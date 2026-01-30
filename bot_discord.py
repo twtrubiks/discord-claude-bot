@@ -23,7 +23,7 @@ ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "")
 
 # Discord 訊息分塊設定
 DISCORD_CHAR_LIMIT = 2000
-FENCE_PATTERN = re.compile(r'^( {0,3})(`{3,}|~{3,})(.*)$', re.MULTILINE)
+FENCE_PATTERN = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$", re.MULTILINE)
 
 
 def chunk_message(text: str, max_chars: int = DISCORD_CHAR_LIMIT) -> list[str]:
@@ -41,7 +41,7 @@ def chunk_message(text: str, max_chars: int = DISCORD_CHAR_LIMIT) -> list[str]:
     fence_marker = ""
     fence_lang = ""
 
-    lines = text.split('\n')
+    lines = text.split("\n")
 
     for line in lines:
         # 檢測圍欄開始/結束
@@ -58,33 +58,34 @@ def chunk_message(text: str, max_chars: int = DISCORD_CHAR_LIMIT) -> list[str]:
                 fence_lang = ""
 
         # 計算加入這行後的長度
-        new_line = line + '\n'
+        new_line = line + "\n"
         potential_length = len(current_chunk) + len(new_line)
 
         # 如果在代碼塊內，需要預留關閉標記的空間
-        reserve = len(fence_marker * 3 + '\n') if inside_fence else 0
+        reserve = len(fence_marker * 3 + "\n") if inside_fence else 0
 
         if potential_length + reserve > max_chars:
             # 需要分塊
             if inside_fence:
                 # 關閉當前代碼塊
-                current_chunk += fence_marker * 3 + '\n'
+                current_chunk += fence_marker * 3 + "\n"
 
-            chunks.append(current_chunk.rstrip('\n'))
+            chunks.append(current_chunk.rstrip("\n"))
 
             # 開始新塊
             if inside_fence:
                 # 重新開啟代碼塊
-                current_chunk = fence_marker * 3 + fence_lang + '\n' + new_line
+                current_chunk = fence_marker * 3 + fence_lang + "\n" + new_line
             else:
                 current_chunk = new_line
         else:
             current_chunk += new_line
 
     if current_chunk:
-        chunks.append(current_chunk.rstrip('\n'))
+        chunks.append(current_chunk.rstrip("\n"))
 
     return chunks
+
 
 # 對話歷史設定
 MAX_CONTEXT_CHARS = 8000  # 上下文最大字符數
@@ -138,9 +139,13 @@ def save_history():
         str(uid): {
             "summary": state.summary,
             "messages": [
-                {"role": m.role, "content": m.content, "timestamp": m.timestamp.isoformat()}
+                {
+                    "role": m.role,
+                    "content": m.content,
+                    "timestamp": m.timestamp.isoformat(),
+                }
                 for m in state.messages
-            ]
+            ],
         }
         for uid, state in conversation_states.items()
     }
@@ -161,19 +166,24 @@ def load_history():
             if isinstance(state_data, list):
                 # 舊格式：直接是 messages list
                 messages = [
-                    Message(m["role"], m["content"], datetime.fromisoformat(m["timestamp"]))
+                    Message(
+                        m["role"], m["content"], datetime.fromisoformat(m["timestamp"])
+                    )
                     for m in state_data
                 ]
-                conversation_states[int(uid)] = ConversationState(summary="", messages=messages)
+                conversation_states[int(uid)] = ConversationState(
+                    summary="", messages=messages
+                )
             else:
                 # 新格式：包含 summary 和 messages
                 messages = [
-                    Message(m["role"], m["content"], datetime.fromisoformat(m["timestamp"]))
+                    Message(
+                        m["role"], m["content"], datetime.fromisoformat(m["timestamp"])
+                    )
                     for m in state_data.get("messages", [])
                 ]
                 conversation_states[int(uid)] = ConversationState(
-                    summary=state_data.get("summary", ""),
-                    messages=messages
+                    summary=state_data.get("summary", ""), messages=messages
                 )
         logger.info(f"Loaded conversation history for {len(data)} users")
     except Exception as e:
@@ -295,7 +305,7 @@ def build_context(user_id: int) -> str:
 
     # 加入最近對話
     if state.messages:
-        context_parts = []
+        context_parts: list[str] = []
         total_chars = 0
 
         # 從最新往回取，確保不超過字符限制
@@ -419,7 +429,9 @@ async def on_message(message: discord.Message):
         state = get_conversation_state(message.author.id)
         history_len = len(state.messages)
         has_summary = "有" if state.summary else "無"
-        await message.channel.send(f"目前對話歷史：{history_len // 2} 輪對話，摘要：{has_summary}")
+        await message.channel.send(
+            f"目前對話歷史：{history_len // 2} 輪對話，摘要：{has_summary}"
+        )
         return
 
     # 特殊命令：手動觸發摘要
@@ -440,7 +452,9 @@ async def on_message(message: discord.Message):
                 state.summary = new_summary
             state.messages = []  # 清空已摘要的對話
             save_history()
-            summary_preview = new_summary[:500] + "..." if len(new_summary) > 500 else new_summary
+            summary_preview = (
+                new_summary[:500] + "..." if len(new_summary) > 500 else new_summary
+            )
             await message.channel.send(f"✓ 摘要已生成：\n\n{summary_preview}")
         else:
             await message.channel.send("摘要生成失敗")
@@ -450,7 +464,11 @@ async def on_message(message: discord.Message):
     if user_message.lower() == "/summary":
         state = get_conversation_state(message.author.id)
         if state.summary:
-            summary_preview = state.summary[:1800] + "..." if len(state.summary) > 1800 else state.summary
+            summary_preview = (
+                state.summary[:1800] + "..."
+                if len(state.summary) > 1800
+                else state.summary
+            )
             await message.channel.send(f"📝 目前摘要：\n\n{summary_preview}")
         else:
             await message.channel.send("目前沒有摘要")
