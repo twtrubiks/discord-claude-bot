@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 import logging
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +21,6 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "")
 
 # 對話歷史設定
-MAX_HISTORY_LENGTH = 10  # 保留最近 10 輪對話
 MAX_CONTEXT_CHARS = 8000  # 上下文最大字符數
 HISTORY_FILE = Path("conversation_history.json")
 
@@ -34,18 +32,54 @@ class Message:
     timestamp: datetime
 
 
-# 每個用戶的對話歷史
-conversation_history: dict[int, list[Message]] = defaultdict(list)
+@dataclass
+class ConversationState:
+    summary: str = ""  # AI 生成的摘要
+    messages: list = None  # 最近的對話
+
+    def __post_init__(self):
+        if self.messages is None:
+            self.messages = []
+
+
+# 每個用戶的對話狀態
+conversation_states: dict[int, ConversationState] = {}
+
+
+def get_conversation_state(user_id: int) -> ConversationState:
+    """取得用戶的對話狀態，如果不存在則創建"""
+    if user_id not in conversation_states:
+        conversation_states[user_id] = ConversationState()
+    return conversation_states[user_id]
+
+
+# AI 摘要設定
+MAX_MESSAGES_BEFORE_COMPRESS = 16  # 超過 8 輪對話時壓縮
+MESSAGES_TO_SUMMARIZE = 10  # 壓縮最舊的 5 輪
+
+SUMMARY_PROMPT = """請將以下對話摘要成重點，保留：
+- 用戶的偏好和設定
+- 重要的決策和結論
+- 待辦事項和承諾
+- 關鍵資訊（名字、日期、數字等）
+
+對話內容：
+{conversation}
+
+請用繁體中文輸出簡潔的摘要（約 200-300 字）："""
 
 
 def save_history():
     """儲存歷史到檔案"""
     data = {
-        str(uid): [
-            {"role": m.role, "content": m.content, "timestamp": m.timestamp.isoformat()}
-            for m in messages
-        ]
-        for uid, messages in conversation_history.items()
+        str(uid): {
+            "summary": state.summary,
+            "messages": [
+                {"role": m.role, "content": m.content, "timestamp": m.timestamp.isoformat()}
+                for m in state.messages
+            ]
+        }
+        for uid, state in conversation_states.items()
     }
     HISTORY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -56,11 +90,25 @@ def load_history():
         return
     try:
         data = json.loads(HISTORY_FILE.read_text())
-        for uid, messages in data.items():
-            conversation_history[int(uid)] = [
-                Message(m["role"], m["content"], datetime.fromisoformat(m["timestamp"]))
-                for m in messages
-            ]
+        for uid, state_data in data.items():
+            # 相容舊格式（純 list）和新格式（dict with summary）
+            if isinstance(state_data, list):
+                # 舊格式：直接是 messages list
+                messages = [
+                    Message(m["role"], m["content"], datetime.fromisoformat(m["timestamp"]))
+                    for m in state_data
+                ]
+                conversation_states[int(uid)] = ConversationState(summary="", messages=messages)
+            else:
+                # 新格式：包含 summary 和 messages
+                messages = [
+                    Message(m["role"], m["content"], datetime.fromisoformat(m["timestamp"]))
+                    for m in state_data.get("messages", [])
+                ]
+                conversation_states[int(uid)] = ConversationState(
+                    summary=state_data.get("summary", ""),
+                    messages=messages
+                )
         logger.info(f"Loaded conversation history for {len(data)} users")
     except Exception as e:
         logger.error(f"Failed to load history: {e}")
@@ -80,24 +128,78 @@ def is_authorized(user_id: int) -> bool:
     return user_id in allowed
 
 
-def build_context(user_id: int) -> str:
-    """組合對話歷史為上下文字串"""
-    history = conversation_history[user_id]
-    if not history:
+def generate_summary(messages: list[Message]) -> str:
+    """用 Claude 生成對話摘要"""
+    conversation_text = "\n".join(
+        f"{m.role.capitalize()}: {m.content}" for m in messages
+    )
+    prompt = SUMMARY_PROMPT.format(conversation=conversation_text)
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return result.stdout.strip() or ""
+    except Exception as e:
+        logger.error(f"Summary generation failed: {e}")
         return ""
 
-    context_parts = []
-    total_chars = 0
 
-    # 從最新往回取，確保不超過字符限制
-    for msg in reversed(history):
-        entry = f"{msg.role.capitalize()}: {msg.content}"
-        if total_chars + len(entry) > MAX_CONTEXT_CHARS:
-            break
-        context_parts.insert(0, entry)
-        total_chars += len(entry)
+def maybe_compress_history(user_id: int):
+    """檢查並在需要時壓縮歷史"""
+    state = get_conversation_state(user_id)
 
-    return "\n\n".join(context_parts)
+    if len(state.messages) >= MAX_MESSAGES_BEFORE_COMPRESS:
+        # 取出最舊的訊息來摘要
+        to_summarize = state.messages[:MESSAGES_TO_SUMMARIZE]
+        to_keep = state.messages[MESSAGES_TO_SUMMARIZE:]
+
+        # 生成新摘要（合併舊摘要）
+        old_summary = state.summary
+        new_summary = generate_summary(to_summarize)
+
+        if new_summary:
+            if old_summary:
+                # 合併新舊摘要
+                state.summary = f"{old_summary}\n\n---\n\n{new_summary}"
+            else:
+                state.summary = new_summary
+
+            state.messages = to_keep
+            save_history()
+            logger.info(f"Compressed history for user {user_id}")
+
+
+def build_context(user_id: int) -> str:
+    """組合摘要 + 最近對話為上下文"""
+    state = get_conversation_state(user_id)
+    parts = []
+
+    # 加入摘要
+    if state.summary:
+        parts.append(f"[Previous conversation summary]\n{state.summary}")
+
+    # 加入最近對話
+    if state.messages:
+        context_parts = []
+        total_chars = 0
+
+        # 從最新往回取，確保不超過字符限制
+        for msg in reversed(state.messages):
+            entry = f"{msg.role.capitalize()}: {msg.content}"
+            if total_chars + len(entry) > MAX_CONTEXT_CHARS:
+                break
+            context_parts.insert(0, entry)
+            total_chars += len(entry)
+
+        if context_parts:
+            recent = "\n\n".join(context_parts)
+            parts.append(f"[Recent conversation]\n{recent}")
+
+    return "\n\n---\n\n".join(parts)
 
 
 def ask_claude(user_id: int, message: str) -> str:
@@ -127,16 +229,15 @@ Please respond to the current message, taking into account the conversation hist
 
         if output:
             # 儲存對話歷史
-            history = conversation_history[user_id]
-            history.append(Message("user", message, datetime.now()))
-            history.append(Message("assistant", output, datetime.now()))
-
-            # 修剪歷史長度
-            if len(history) > MAX_HISTORY_LENGTH * 2:
-                conversation_history[user_id] = history[-(MAX_HISTORY_LENGTH * 2):]
+            state = get_conversation_state(user_id)
+            state.messages.append(Message("user", message, datetime.now()))
+            state.messages.append(Message("assistant", output, datetime.now()))
 
             # 儲存到檔案
             save_history()
+
+            # 檢查是否需要壓縮
+            maybe_compress_history(user_id)
 
         return output or f"Claude returned no output.\nstderr: {result.stderr.strip()}"
 
@@ -171,17 +272,53 @@ async def on_message(message: discord.Message):
 
     user_message = message.content
 
-    # 特殊命令：清除歷史
+    # 特殊命令：清除歷史和摘要
     if user_message.lower() in ["/clear", "/reset", "清除歷史"]:
-        conversation_history[message.author.id] = []
+        conversation_states[message.author.id] = ConversationState()
         save_history()
-        await message.channel.send("✓ 對話歷史已清除")
+        await message.channel.send("✓ 對話歷史和摘要已清除")
         return
 
     # 特殊命令：查看歷史長度
     if user_message.lower() in ["/history", "歷史"]:
-        history_len = len(conversation_history[message.author.id])
-        await message.channel.send(f"目前對話歷史：{history_len // 2} 輪對話")
+        state = get_conversation_state(message.author.id)
+        history_len = len(state.messages)
+        has_summary = "有" if state.summary else "無"
+        await message.channel.send(f"目前對話歷史：{history_len // 2} 輪對話，摘要：{has_summary}")
+        return
+
+    # 特殊命令：手動觸發摘要
+    if user_message.lower() == "/summarize":
+        state = get_conversation_state(message.author.id)
+        if not state.messages:
+            await message.channel.send("目前沒有對話需要摘要")
+            return
+
+        await message.channel.send("正在生成摘要...")
+        async with message.channel.typing():
+            new_summary = generate_summary(state.messages)
+
+        if new_summary:
+            if state.summary:
+                state.summary = f"{state.summary}\n\n---\n\n{new_summary}"
+            else:
+                state.summary = new_summary
+            state.messages = []  # 清空已摘要的對話
+            save_history()
+            summary_preview = new_summary[:500] + "..." if len(new_summary) > 500 else new_summary
+            await message.channel.send(f"✓ 摘要已生成：\n\n{summary_preview}")
+        else:
+            await message.channel.send("摘要生成失敗")
+        return
+
+    # 特殊命令：查看目前摘要
+    if user_message.lower() == "/summary":
+        state = get_conversation_state(message.author.id)
+        if state.summary:
+            summary_preview = state.summary[:1800] + "..." if len(state.summary) > 1800 else state.summary
+            await message.channel.send(f"📝 目前摘要：\n\n{summary_preview}")
+        else:
+            await message.channel.send("目前沒有摘要")
         return
 
     logger.info(f"User {message.author.id}: {user_message[:50]}...")
