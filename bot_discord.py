@@ -3,9 +3,12 @@ import os
 import re
 import subprocess
 import logging
+import random
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import discord
 from dotenv import load_dotenv
@@ -323,8 +326,17 @@ def build_context(user_id: int) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def ask_claude(user_id: int, message: str) -> str:
-    """調用 Claude CLI，包含對話歷史"""
+def ask_claude(user_id: int, message: str, max_retries: int = 3) -> str:
+    """調用 Claude CLI，包含對話歷史和重試機制
+
+    Args:
+        user_id: 用戶 ID
+        message: 用戶訊息
+        max_retries: 最大重試次數（預設 3 次）
+
+    Returns:
+        Claude 的回應或錯誤訊息
+    """
     # 組合上下文
     context = build_context(user_id)
 
@@ -339,41 +351,58 @@ Please respond to the current message, taking into account the conversation hist
     else:
         full_prompt = message
 
-    try:
-        result = subprocess.run(
-            ["claude", "-p", full_prompt],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        # 檢查返回碼
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() or "未知錯誤"
-            logger.error(f"Claude CLI error (code {result.returncode}): {error_msg}")
-            return f"Claude 執行失敗: {error_msg}"
+    last_error: Optional[str] = None
 
-        output = result.stdout.strip()
+    for attempt in range(max_retries):
+        try:
+            result = subprocess.run(
+                ["claude", "-p", full_prompt],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            # 檢查返回碼
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or "未知錯誤"
+                logger.error(f"Claude CLI error (code {result.returncode}): {error_msg}")
+                return f"Claude 執行失敗: {error_msg}"
 
-        if output:
-            # 儲存對話歷史
-            state = get_conversation_state(user_id)
-            state.messages.append(Message("user", message, datetime.now()))
-            state.messages.append(Message("assistant", output, datetime.now()))
+            output = result.stdout.strip()
 
-            # 儲存到檔案
-            save_history()
+            if output:
+                # 儲存對話歷史
+                state = get_conversation_state(user_id)
+                state.messages.append(Message("user", message, datetime.now()))
+                state.messages.append(Message("assistant", output, datetime.now()))
 
-            # 檢查是否需要壓縮
-            maybe_compress_history(user_id)
+                # 儲存到檔案
+                save_history()
 
-        return output or f"Claude returned no output.\nstderr: {result.stderr.strip()}"
+                # 檢查是否需要壓縮
+                maybe_compress_history(user_id)
 
-    except subprocess.TimeoutExpired:
-        return "Claude Code timeout (over 120 seconds)."
-    except FileNotFoundError:
-        return "claude CLI not found, please make sure Claude Code is installed."
-    except Exception as e:
-        return f"Error: {e}"
+            return output or f"Claude returned no output.\nstderr: {result.stderr.strip()}"
+
+        except subprocess.TimeoutExpired:
+            last_error = "timeout"
+            if attempt < max_retries - 1:
+                # 指數退避 + 隨機抖動
+                delay = (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(
+                    f"Claude timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
+            else:
+                logger.error(f"Claude timeout after {max_retries} attempts")
+                return f"Claude 多次超時（{max_retries} 次），請稍後再試"
+
+        except FileNotFoundError:
+            return "claude CLI not found, please make sure Claude Code is installed."
+        except Exception as e:
+            return f"Error: {e}"
+
+    # 這裡理論上不會執行到，但為了完整性
+    return f"Claude 執行失敗: {last_error or '未知錯誤'}"
 
 
 intents = discord.Intents.default()
