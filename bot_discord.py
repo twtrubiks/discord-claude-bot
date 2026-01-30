@@ -1,10 +1,10 @@
+import asyncio
 import json
+import logging
 import os
+import random
 import re
 import subprocess
-import logging
-import random
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -334,7 +334,7 @@ def build_context(user_id: int) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def ask_claude(user_id: int, message: str, max_retries: int = 3) -> str:
+async def ask_claude(user_id: int, message: str, max_retries: int = 3) -> str:
     """調用 Claude CLI，包含對話歷史和重試機制
 
     Args:
@@ -399,7 +399,7 @@ Please respond to the current message, taking into account the conversation hist
                 logger.warning(
                     f"Claude timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
                 )
-                time.sleep(delay)
+                await asyncio.sleep(delay)
             else:
                 logger.error(f"Claude timeout after {max_retries} attempts")
                 return f"Claude 多次超時（{max_retries} 次），請稍後再試"
@@ -595,7 +595,7 @@ async def on_message(message: discord.Message):
 
     # show typing indicator
     async with message.channel.typing():
-        response = ask_claude(message.author.id, user_message)
+        response = await ask_claude(message.author.id, user_message)
 
     # Discord message limit is 2000 characters
     # 使用智能分塊，保持代碼塊完整
