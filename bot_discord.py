@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import logging
 from dataclasses import dataclass, field
@@ -19,6 +20,71 @@ logger = logging.getLogger(__name__)
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "")
+
+# Discord 訊息分塊設定
+DISCORD_CHAR_LIMIT = 2000
+FENCE_PATTERN = re.compile(r'^( {0,3})(`{3,}|~{3,})(.*)$', re.MULTILINE)
+
+
+def chunk_message(text: str, max_chars: int = DISCORD_CHAR_LIMIT) -> list[str]:
+    """智能分塊，保持代碼塊完整
+
+    當訊息超過 Discord 字數限制時，會在適當的位置分割，
+    並確保代碼塊（```）在分割處正確關閉和重新開啟。
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks = []
+    current_chunk = ""
+    inside_fence = False
+    fence_marker = ""
+    fence_lang = ""
+
+    lines = text.split('\n')
+
+    for line in lines:
+        # 檢測圍欄開始/結束
+        fence_match = FENCE_PATTERN.match(line)
+        if fence_match:
+            marker = fence_match.group(2)
+            if not inside_fence:
+                inside_fence = True
+                fence_marker = marker[0]
+                fence_lang = fence_match.group(3).strip()
+            elif line.strip().startswith(fence_marker * 3):
+                inside_fence = False
+                fence_marker = ""
+                fence_lang = ""
+
+        # 計算加入這行後的長度
+        new_line = line + '\n'
+        potential_length = len(current_chunk) + len(new_line)
+
+        # 如果在代碼塊內，需要預留關閉標記的空間
+        reserve = len(fence_marker * 3 + '\n') if inside_fence else 0
+
+        if potential_length + reserve > max_chars:
+            # 需要分塊
+            if inside_fence:
+                # 關閉當前代碼塊
+                current_chunk += fence_marker * 3 + '\n'
+
+            chunks.append(current_chunk.rstrip('\n'))
+
+            # 開始新塊
+            if inside_fence:
+                # 重新開啟代碼塊
+                current_chunk = fence_marker * 3 + fence_lang + '\n' + new_line
+            else:
+                current_chunk = new_line
+        else:
+            current_chunk += new_line
+
+    if current_chunk:
+        chunks.append(current_chunk.rstrip('\n'))
+
+    return chunks
 
 # 對話歷史設定
 MAX_CONTEXT_CHARS = 8000  # 上下文最大字符數
@@ -369,11 +435,10 @@ async def on_message(message: discord.Message):
         response = ask_claude(message.author.id, user_message)
 
     # Discord message limit is 2000 characters
-    if len(response) > 2000:
-        for i in range(0, len(response), 2000):
-            await message.channel.send(response[i : i + 2000])
-    else:
-        await message.channel.send(response)
+    # 使用智能分塊，保持代碼塊完整
+    chunks = chunk_message(response)
+    for chunk in chunks:
+        await message.channel.send(chunk)
 
 
 def main():
