@@ -21,3 +21,6 @@ env/
 
 # Conversation history
 conversation_history.json
+
+# Cron jobs
+cron_jobs.json

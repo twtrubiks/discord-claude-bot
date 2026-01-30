@@ -13,6 +13,14 @@ from typing import Optional
 import discord
 from dotenv import load_dotenv
 
+from cron_scheduler import cron_scheduler
+from cron_commands import (
+    handle_cron_command,
+    handle_remind_command,
+    handle_every_command,
+    handle_daily_command,
+)
+
 load_dotenv()
 
 logging.basicConfig(
@@ -410,9 +418,54 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 
+async def send_channel_message(channel_id: int, message: str):
+    """發送訊息到指定頻道"""
+    channel = client.get_channel(channel_id)
+    if channel:
+        for chunk in chunk_message(message):
+            await channel.send(chunk)
+
+
+async def invoke_claude_for_channel(channel_id: int, user_id: int, prompt: str) -> str:
+    """為頻道觸發 Claude 回應（不帶對話歷史）"""
+    channel = client.get_channel(channel_id)
+    if not channel:
+        return ""
+
+    async with channel.typing():
+        # 直接呼叫 claude -p，不帶對話歷史
+        try:
+            result = subprocess.run(
+                ["claude", "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                response = f"Claude 執行失敗: {result.stderr.strip()}"
+            else:
+                response = result.stdout.strip() or "Claude 無回應"
+        except subprocess.TimeoutExpired:
+            response = "Claude 執行超時"
+        except Exception as e:
+            response = f"錯誤: {e}"
+
+    for chunk in chunk_message(response):
+        await channel.send(chunk)
+    return response
+
+
 @client.event
 async def on_ready():
     logger.info(f"Bot logged in as {client.user}")
+
+    # 設定排程器回調並啟動
+    cron_scheduler.set_callbacks(
+        message_sender=send_channel_message,
+        claude_invoker=invoke_claude_for_channel
+    )
+    await cron_scheduler.start()
+    logger.info("Cron scheduler started")
 
 
 @client.event
@@ -440,6 +493,16 @@ async def on_message(message: discord.Message):
 • `/history` 或 `歷史` - 查看對話狀態
 • `/summarize` - 手動生成摘要
 • `/summary` - 查看當前摘要
+
+**排程指令：**
+• `/cron list` - 列出所有排程任務
+• `/cron info <id>` - 查看任務詳情
+• `/cron remove <id>` - 刪除任務
+• `/cron toggle <id>` - 啟用/停用任務
+• `/cron test <id>` - 立即執行測試
+• `/remind <時間> <訊息>` - 一次性提醒（如 `/remind 30m 開會`）
+• `/every <間隔> <訊息>` - 定期訊息（如 `/every 1h 喝水`）
+• `/daily <HH:MM> <提示>` - 每日觸發 Claude（如 `/daily 09:00 今日新聞`）
 
 **使用方式：**
 直接輸入訊息即可與 Claude 對話，Bot 會記住對話歷史。"""
@@ -501,6 +564,31 @@ async def on_message(message: discord.Message):
             await message.channel.send(f"📝 目前摘要：\n\n{summary_preview}")
         else:
             await message.channel.send("目前沒有摘要")
+        return
+
+    # Cron 排程指令
+    if user_message.lower().startswith("/cron"):
+        args = user_message.split()[1:]
+        response = await handle_cron_command("cron", args, message.channel.id, message.author.id)
+        await message.channel.send(response)
+        return
+
+    if user_message.lower().startswith("/remind"):
+        args = user_message.split()[1:]
+        response = await handle_remind_command(args, message.channel.id, message.author.id)
+        await message.channel.send(response)
+        return
+
+    if user_message.lower().startswith("/every"):
+        args = user_message.split()[1:]
+        response = await handle_every_command(args, message.channel.id, message.author.id)
+        await message.channel.send(response)
+        return
+
+    if user_message.lower().startswith("/daily"):
+        args = user_message.split()[1:]
+        response = await handle_daily_command(args, message.channel.id, message.author.id)
+        await message.channel.send(response)
         return
 
     logger.info(f"User {message.author.id}: {user_message[:50]}...")
