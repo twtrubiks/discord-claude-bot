@@ -216,6 +216,10 @@ def compress_summary(summary: str) -> str:
             text=True,
             timeout=60,
         )
+        # 檢查返回碼
+        if result.returncode != 0:
+            logger.error(f"Summary compression CLI error: {result.stderr.strip()}")
+            return summary
         compressed = result.stdout.strip()
         if compressed:
             logger.info("Compressed long summary")
@@ -240,6 +244,10 @@ def generate_summary(messages: list[Message]) -> str:
             text=True,
             timeout=60,
         )
+        # 檢查返回碼
+        if result.returncode != 0:
+            logger.error(f"Summary generation CLI error: {result.stderr.strip()}")
+            return ""
         return result.stdout.strip() or ""
     except Exception as e:
         logger.error(f"Summary generation failed: {e}")
@@ -328,6 +336,12 @@ Please respond to the current message, taking into account the conversation hist
             text=True,
             timeout=120,
         )
+        # 檢查返回碼
+        if result.returncode != 0:
+            error_msg = result.stderr.strip() or "未知錯誤"
+            logger.error(f"Claude CLI error (code {result.returncode}): {error_msg}")
+            return f"Claude 執行失敗: {error_msg}"
+
         output = result.stdout.strip()
 
         if output:
@@ -377,6 +391,20 @@ async def on_message(message: discord.Message):
 
     # 忽略空訊息
     if not user_message:
+        return
+
+    # 特殊命令：顯示說明
+    if user_message.lower() in ["/help", "說明", "幫助"]:
+        help_text = """**可用指令：**
+• `/help` 或 `說明` - 顯示此說明
+• `/clear` 或 `清除歷史` - 清除對話歷史和摘要
+• `/history` 或 `歷史` - 查看對話狀態
+• `/summarize` - 手動生成摘要
+• `/summary` - 查看當前摘要
+
+**使用方式：**
+直接輸入訊息即可與 Claude 對話，Bot 會記住對話歷史。"""
+        await message.channel.send(help_text)
         return
 
     # 特殊命令：清除歷史和摘要
