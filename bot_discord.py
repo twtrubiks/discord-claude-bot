@@ -2,7 +2,7 @@ import json
 import os
 import subprocess
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -35,11 +35,7 @@ class Message:
 @dataclass
 class ConversationState:
     summary: str = ""  # AI 生成的摘要
-    messages: list = None  # 最近的對話
-
-    def __post_init__(self):
-        if self.messages is None:
-            self.messages = []
+    messages: list = field(default_factory=list)  # 最近的對話
 
 
 # 每個用戶的對話狀態
@@ -56,6 +52,7 @@ def get_conversation_state(user_id: int) -> ConversationState:
 # AI 摘要設定
 MAX_MESSAGES_BEFORE_COMPRESS = 16  # 超過 8 輪對話時壓縮
 MESSAGES_TO_SUMMARIZE = 10  # 壓縮最舊的 5 輪
+MAX_SUMMARY_CHARS = 2000  # 摘要最大字符數
 
 SUMMARY_PROMPT = """請將以下對話摘要成重點，保留：
 - 用戶的偏好和設定
@@ -81,7 +78,10 @@ def save_history():
         }
         for uid, state in conversation_states.items()
     }
-    HISTORY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    try:
+        HISTORY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logger.error(f"Failed to save history: {e}")
 
 
 def load_history():
@@ -114,7 +114,6 @@ def load_history():
         logger.error(f"Failed to load history: {e}")
 
 
-
 def get_allowed_users() -> set[int]:
     if not ALLOWED_USER_IDS:
         return set()
@@ -126,6 +125,39 @@ def is_authorized(user_id: int) -> bool:
     if not allowed:
         return True
     return user_id in allowed
+
+
+COMPRESS_SUMMARY_PROMPT = """以下是多段對話摘要的累積，請將它們整合成一份精簡的摘要，保留最重要的資訊：
+- 用戶的核心偏好和設定
+- 重要的決策和結論
+- 仍然有效的待辦事項
+- 關鍵資訊（名字、日期、數字等）
+
+原始摘要：
+{summary}
+
+請用繁體中文輸出整合後的摘要（約 300-500 字）："""
+
+
+def compress_summary(summary: str) -> str:
+    """壓縮過長的摘要"""
+    prompt = COMPRESS_SUMMARY_PROMPT.format(summary=summary)
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        compressed = result.stdout.strip()
+        if compressed:
+            logger.info("Compressed long summary")
+            return compressed
+        return summary  # 壓縮失敗則保留原摘要
+    except Exception as e:
+        logger.error(f"Summary compression failed: {e}")
+        return summary  # 壓縮失敗則保留原摘要
 
 
 def generate_summary(messages: list[Message]) -> str:
@@ -164,7 +196,12 @@ def maybe_compress_history(user_id: int):
         if new_summary:
             if old_summary:
                 # 合併新舊摘要
-                state.summary = f"{old_summary}\n\n---\n\n{new_summary}"
+                combined = f"{old_summary}\n\n---\n\n{new_summary}"
+                # 如果合併後太長，重新壓縮整個摘要
+                if len(combined) > MAX_SUMMARY_CHARS:
+                    state.summary = compress_summary(combined)
+                else:
+                    state.summary = combined
             else:
                 state.summary = new_summary
 
@@ -270,7 +307,11 @@ async def on_message(message: discord.Message):
         logger.warning(f"Unauthorized access attempt from user_id={message.author.id}")
         return
 
-    user_message = message.content
+    user_message = message.content.strip()
+
+    # 忽略空訊息
+    if not user_message:
+        return
 
     # 特殊命令：清除歷史和摘要
     if user_message.lower() in ["/clear", "/reset", "清除歷史"]:
