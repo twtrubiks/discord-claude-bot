@@ -5,6 +5,7 @@ import os
 import random
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,9 @@ ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "")
 # Discord 訊息分塊設定
 DISCORD_CHAR_LIMIT = 2000
 FENCE_PATTERN = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$", re.MULTILINE)
+
+# 執行緒池：用於執行阻塞的 subprocess 呼叫，避免阻塞 asyncio 事件循環
+executor = ThreadPoolExecutor(max_workers=4)
 
 
 def chunk_message(text: str, max_chars: int = DISCORD_CHAR_LIMIT) -> list[str]:
@@ -113,7 +117,7 @@ class Message:
 @dataclass
 class ConversationState:
     summary: str = ""  # AI 生成的摘要
-    messages: list = field(default_factory=list)  # 最近的對話
+    messages: list[Message] = field(default_factory=list)  # 最近的對話
 
 
 # 每個用戶的對話狀態
@@ -227,7 +231,7 @@ COMPRESS_SUMMARY_PROMPT = """以下是多段對話摘要的累積，請將它們
 
 
 def compress_summary(summary: str) -> str:
-    """壓縮過長的摘要"""
+    """壓縮過長的摘要（同步函數，會阻塞）"""
     prompt = COMPRESS_SUMMARY_PROMPT.format(summary=summary)
 
     try:
@@ -252,7 +256,7 @@ def compress_summary(summary: str) -> str:
 
 
 def generate_summary(messages: list[Message]) -> str:
-    """用 Claude 生成對話摘要"""
+    """用 Claude 生成對話摘要（同步函數，會阻塞）"""
     conversation_text = "\n".join(
         f"{m.role.capitalize()}: {m.content}" for m in messages
     )
@@ -276,7 +280,7 @@ def generate_summary(messages: list[Message]) -> str:
 
 
 def maybe_compress_history(user_id: int):
-    """檢查並在需要時壓縮歷史"""
+    """檢查並在需要時壓縮歷史（同步函數，會阻塞）"""
     state = get_conversation_state(user_id)
 
     if len(state.messages) >= MAX_MESSAGES_BEFORE_COMPRESS:
@@ -334,13 +338,17 @@ def build_context(user_id: int) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-async def ask_claude(user_id: int, message: str, max_retries: int = 3) -> str:
+async def ask_claude(user_id: int, message: str, max_retries: int = 3, timeout: int = 600) -> str:
     """調用 Claude CLI，包含對話歷史和重試機制
+
+    使用 ThreadPoolExecutor 執行 subprocess，避免阻塞 asyncio 事件循環，
+    確保 Discord heartbeat 正常運作。
 
     Args:
         user_id: 用戶 ID
         message: 用戶訊息
         max_retries: 最大重試次數（預設 3 次）
+        timeout: 單次執行超時秒數（預設 600 秒 = 10 分鐘）
 
     Returns:
         Claude 的回應或錯誤訊息
@@ -359,16 +367,23 @@ Please respond to the current message, taking into account the conversation hist
     else:
         full_prompt = message
 
+    def run_claude_sync() -> subprocess.CompletedProcess:
+        """同步執行 Claude CLI（在執行緒池中執行）"""
+        return subprocess.run(
+            ["claude", "-p", full_prompt],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
     last_error: Optional[str] = None
+    loop = asyncio.get_running_loop()
 
     for attempt in range(max_retries):
         try:
-            result = subprocess.run(
-                ["claude", "-p", full_prompt],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+            # 使用執行緒池執行阻塞呼叫，不會阻塞 asyncio 事件循環
+            result = await loop.run_in_executor(executor, run_claude_sync)
+
             # 檢查返回碼
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or "未知錯誤"
@@ -386,8 +401,8 @@ Please respond to the current message, taking into account the conversation hist
                 # 儲存到檔案
                 save_history()
 
-                # 檢查是否需要壓縮
-                maybe_compress_history(user_id)
+                # 檢查是否需要壓縮（在執行緒池中執行，避免阻塞事件循環）
+                await loop.run_in_executor(executor, maybe_compress_history, user_id)
 
             return output or f"Claude returned no output.\nstderr: {result.stderr.strip()}"
 
@@ -426,21 +441,30 @@ async def send_channel_message(channel_id: int, message: str):
             await channel.send(chunk)
 
 
-async def invoke_claude_for_channel(channel_id: int, user_id: int, prompt: str) -> str:
-    """為頻道觸發 Claude 回應（不帶對話歷史）"""
+async def invoke_claude_for_channel(channel_id: int, _user_id: int, prompt: str, timeout: int = 600) -> str:
+    """為頻道觸發 Claude 回應（不帶對話歷史）
+
+    使用 ThreadPoolExecutor 執行 subprocess，避免阻塞 asyncio 事件循環。
+    """
     channel = client.get_channel(channel_id)
     if not channel:
         return ""
 
+    def run_claude_sync() -> subprocess.CompletedProcess:
+        """同步執行 Claude CLI（在執行緒池中執行）"""
+        return subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
     async with channel.typing():
-        # 直接呼叫 claude -p，不帶對話歷史
+        # 使用執行緒池執行阻塞呼叫，不會阻塞 asyncio 事件循環
         try:
-            result = subprocess.run(
-                ["claude", "-p", prompt],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(executor, run_claude_sync)
+
             if result.returncode != 0:
                 response = f"Claude 執行失敗: {result.stderr.strip()}"
             else:
@@ -535,7 +559,10 @@ async def on_message(message: discord.Message):
 
         await message.channel.send("正在生成摘要...")
         async with message.channel.typing():
-            new_summary = generate_summary(state.messages)
+            loop = asyncio.get_running_loop()
+            new_summary = await loop.run_in_executor(
+                executor, generate_summary, state.messages
+            )
 
         if new_summary:
             if state.summary:
