@@ -514,7 +514,7 @@ async def on_message(message: discord.Message):
         help_text = """**可用指令：**
 • `/help` 或 `說明` - 顯示此說明
 • `/clear` 或 `清除歷史` - 清除對話歷史和摘要
-• `/history` 或 `歷史` - 查看對話狀態
+• `/context` 或 `上下文` - 查看上下文狀態
 • `/summarize` - 手動生成摘要
 • `/summary` - 查看當前摘要
 
@@ -540,13 +540,13 @@ async def on_message(message: discord.Message):
         await message.channel.send("✓ 對話歷史和摘要已清除")
         return
 
-    # 特殊命令：查看歷史長度
-    if user_message.lower() in ["/history", "歷史"]:
+    # 特殊命令：查看上下文狀態
+    if user_message.lower() in ["/context", "上下文"]:
         state = get_conversation_state(message.author.id)
         history_len = len(state.messages)
         has_summary = "有" if state.summary else "無"
         await message.channel.send(
-            f"目前對話歷史：{history_len // 2} 輪對話，摘要：{has_summary}"
+            f"目前上下文：{history_len // 2} 輪對話，摘要：{has_summary}"
         )
         return
 
