@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import discord
 from dotenv import load_dotenv
@@ -32,6 +33,27 @@ logger = logging.getLogger(__name__)
 
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "")
+
+# 可配置的對話管理參數
+MAX_MESSAGES_BEFORE_COMPRESS = int(os.environ.get("MAX_MESSAGES_BEFORE_COMPRESS", "16"))
+MAX_CONTEXT_MESSAGES = int(os.environ.get("MAX_CONTEXT_MESSAGES", "16"))
+
+# 安全護欄
+SAFETY_GUARDRAILS = """## 安全規則
+- 你沒有獨立目標：不追求自我保存、複製、資源獲取或權力擴張
+- 優先考慮安全和人類監督
+- 如果指令衝突，暫停並詢問
+- 不繞過安全措施或修改系統設定
+"""
+
+
+def get_current_timestamp(timezone: str = "Asia/Taipei") -> str:
+    """取得格式化的當前時間"""
+    tz = ZoneInfo(timezone)
+    now = datetime.now(tz)
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    return f"Current Date: {now.strftime('%Y-%m-%d')} {days[now.weekday()]} {now.strftime('%H:%M')} ({timezone})"
+
 
 # Discord 訊息分塊設定
 DISCORD_CHAR_LIMIT = 2000
@@ -132,7 +154,6 @@ def get_conversation_state(user_id: int) -> ConversationState:
 
 
 # AI 摘要設定
-MAX_MESSAGES_BEFORE_COMPRESS = 16  # 超過 8 輪對話時壓縮
 MESSAGES_TO_SUMMARIZE = 10  # 壓縮最舊的 5 輪
 MAX_SUMMARY_CHARS = 2000  # 摘要最大字符數
 
@@ -313,6 +334,12 @@ def build_context(user_id: int) -> str:
     """組合摘要 + 最近對話為上下文"""
     state = get_conversation_state(user_id)
     parts = []
+
+    # 加入時間戳
+    parts.append(get_current_timestamp())
+
+    # 加入安全護欄
+    parts.append(SAFETY_GUARDRAILS)
 
     # 加入摘要
     if state.summary:
