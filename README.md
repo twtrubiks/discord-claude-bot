@@ -10,6 +10,7 @@
 
 - 與 Claude AI 對話
 - 對話歷史管理與自動摘要
+- 長期記憶（跨對話記住用戶偏好與重要事實）
 - 排程任務（一次性提醒、定期訊息、每日排程）
 
 ## 安裝
@@ -39,8 +40,16 @@ python bot_discord.py
 
 **對話**
 - `/help` - 顯示說明
-- `/clear` - 清除對話歷史
+- `/new` - 保存記憶並開始新對話
+- `/clear` - 清除對話歷史和摘要（保留長期記憶）
 - `/context` - 查看上下文狀態
+- `/summarize` - 手動生成摘要
+- `/summary` - 查看當前摘要
+
+**記憶**
+- `/memory` - 查看長期記憶
+- `/forget` - 清除所有長期記憶
+- `/forget <編號>` - 刪除特定一條記憶
 
 **排程**
 - `/remind <時間> <訊息>` - 一次性提醒（如 `/remind 30m 開會`）
@@ -60,12 +69,12 @@ on_message() 接收
         ├─ 不在白名單？    → 回應「未授權」
         ├─ 空訊息？        → 忽略
         ├─ 特殊指令？      → 對應處理
-        │   (/help, /clear, /cron, /remind...)
+        │   (/help, /new, /clear, /memory, /forget, /cron, /remind...)
         │
         ▼
 ask_claude(user_id, message)
         │
-        ├─ 組合上下文（摘要 + 歷史）
+        ├─ 組合上下文（長期記憶 + 摘要 + 歷史）
         │
         ▼
 subprocess.run(["claude", "-p", prompt])
@@ -89,6 +98,7 @@ chunk_message() 分塊處理（代碼塊感知）
 - `Message` dataclass：儲存單條訊息（role, content, timestamp）
 - `ConversationState` dataclass：儲存對話狀態（summary 摘要 + messages 最近對話）
 - `conversation_states`：以 user_id 為 key 的字典，每個用戶擁有獨立的對話狀態
+- `user_memories`：以 user_id 為 key 的字典，儲存每個用戶的長期記憶（事實列表）
 
 ### 對話格式設計
 
@@ -105,8 +115,24 @@ chunk_message() 分塊處理（代碼塊感知）
 #### 實際送給 Claude 的格式
 
 ```
+Current Date: 2026-02-15 Sat 10:30 (Asia/Taipei)
+
+---
+
+你是一個 Discord 上的個人 AI 助手...（系統 prompt）
+
+---
+
+[Long-term memory about this user]
+- 用戶是軟體開發者，主要使用 Python 和 Docker
+- 用戶對台股分析有興趣
+
+---
+
 [Previous conversation summary]
 用戶偏好簡潔回答，之前討論過 Python 專案...
+
+---
 
 [Recent conversation]
 User: 你好
@@ -127,12 +153,14 @@ Current message from user:
 - 頻繁切換主題可能導致**上下文混淆**和**幻覺**
 - 一旦走錯方向，LLM 難以自我修正
 
-**建議**：切換不同主題時，使用 `/clear` 清除歷史，避免不相關的上下文干擾。
+**建議**：切換不同主題時，使用 `/new` 開始新對話，會自動保存重要資訊到長期記憶，避免不相關的上下文干擾。
 
 ### 持久化
 
 - `save_history()`：將對話狀態序列化為 JSON，存到 `conversation_history.json`
 - `load_history()`：啟動時載入歷史記錄（支援新舊格式相容）
+- `save_memory()`：將長期記憶序列化為 JSON，存到 `memory.json`
+- `load_memory()`：啟動時載入長期記憶
 
 ### 限制參數
 
@@ -140,6 +168,8 @@ Current message from user:
 |------|-----|------|
 | `MAX_CONTEXT_CHARS` | 8000 | 送給 Claude 的上下文最大字元數 |
 | `MAX_SUMMARY_CHARS` | 2000 | 摘要最大字元數 |
+| `MAX_MEMORY_FACTS` | 20 | 每用戶最多保留的長期記憶事實數量 |
+| `MAX_MEMORY_CHARS` | 1500 | 記憶注入上下文的最大字符數 |
 | 壓縮觸發門檻 | 16 條訊息 | 超過此數量觸發自動壓縮 |
 
 ### 運作流程
@@ -153,6 +183,7 @@ Current message from user:
     ▼
 組合上下文送出 ◄─── 限制：最多 8000 字符
     │                 （從最新往回取）
+    │                 包含：長期記憶 + 摘要 + 最近對話
     ▼
 檢查 len(messages) >= 16？
     │
@@ -161,13 +192,70 @@ Current message from user:
     └─ 是 → 觸發壓縮
               │
               ├─ 取最舊 10 條訊息
-              ├─ 呼叫 Claude 生成摘要
-              ├─ 合併到現有 summary
+              ├─ 呼叫 Claude 生成摘要 + 提取事實
+              ├─ 合併摘要到現有 summary
               │     │
               │     └─ 超過 2000 字？→ 再壓縮
               │
+              ├─ 合併事實到長期記憶 (memory.json)
+              │
               └─ 保留最新 6 條訊息
 ```
+
+## 長期記憶
+
+除了 session 內的摘要壓縮，本專案還實作了跨對話的長期記憶系統。
+
+### 兩層記憶架構
+
+| 層級 | 用途 | 生命週期 | 儲存位置 |
+|------|------|----------|----------|
+| **摘要 (summary)** | 單次對話內的上下文壓縮 | `/clear` 或 `/new` 時清除 | `conversation_history.json` |
+| **長期記憶 (memory)** | 跨對話的用戶事實 | 永久保留，需 `/forget` 清除 | `memory.json` |
+
+### 記憶如何產生
+
+長期記憶的提取**不會產生額外的 Claude 呼叫**，而是搭載在現有的壓縮流程中：
+
+1. **自動壓縮時**：當訊息數 >= 16，`generate_summary()` 會同時提取摘要和事實
+2. **手動 `/summarize` 時**：同樣會順便提取事實
+3. **`/new` 時**：如果當前有 >= 4 條訊息，會呼叫一次 Claude 提取事實後再清空
+
+### 記憶儲存格式
+
+`memory.json`：
+
+```json
+{
+  "825626482582749194": {
+    "facts": [
+      "用戶是軟體開發者，主要使用 Python 和 Docker",
+      "用戶對台股分析有興趣",
+      "用戶偏好繁體中文回應"
+    ],
+    "updated_at": "2026-02-15T10:30:00"
+  }
+}
+```
+
+### 記憶管理
+
+- **去重**：新事實與已有事實做子字串比對，避免重複
+- **上限**：每用戶最多 20 條事實，超過時淘汰最舊的
+- **手動管理**：
+  - `/memory` 查看所有記憶（帶編號）
+  - `/forget 3` 刪除第 3 條
+  - `/forget` 清除全部
+
+### `/new` vs `/clear`
+
+| | `/new` | `/clear` |
+|---|---|---|
+| 清除對話歷史 | 是 | 是 |
+| 清除摘要 | 是 | 是 |
+| 提取長期記憶 | 是（>= 4 條訊息時） | 否 |
+| 清除長期記憶 | 否 | 否 |
+| 適用場景 | 切換話題（推薦） | 完全重置對話 |
 
 為了讓這套記憶系統在 Discord 環境中順暢運作，需要特別處理非同步執行的問題。
 
@@ -193,8 +281,9 @@ on_message (async, 主執行緒/事件循環)
             │
             └── run_in_executor(maybe_compress_history) ← 執行緒池
                     │
-                    ├── generate_summary()  ← 同步，subprocess
+                    ├── generate_summary()  ← 同步，subprocess（同時提取事實）
                     ├── compress_summary()  ← 同步，subprocess
+                    ├── merge_memory_facts() + save_memory() ← 同步，檔案 I/O
                     └── save_history()      ← 同步，檔案 I/O
 ```
 
@@ -209,6 +298,8 @@ on_message (async, 主執行緒/事件循環)
 | `maybe_compress_history` | 執行緒池 | 否 |
 | `generate_summary` | 執行緒池（同一執行緒） | 否 |
 | `compress_summary` | 執行緒池（同一執行緒） | 否 |
+| `merge_memory_facts` | 執行緒池（同一執行緒） | 否 |
+| `save_memory`（壓縮流程內） | 執行緒池 | 否 |
 | `save_history`（壓縮流程內） | 執行緒池 | 否 |
 
 `maybe_compress_history` 整個函數（包含內部的 subprocess 和檔案 I/O）都在執行緒池中執行，不會阻塞 Discord 的事件循環，確保 heartbeat 正常運作。
@@ -268,9 +359,11 @@ and cannot be used for other API requests."
 ## 專案結構
 
 ```
-bot_discord.py      # 主程式
-cron_scheduler.py   # 排程核心
-cron_commands.py    # 排程命令處理
+bot_discord.py              # 主程式
+cron_scheduler.py           # 排程核心
+cron_commands.py            # 排程命令處理
+conversation_history.json   # 對話歷史（自動產生）
+memory.json                 # 長期記憶（自動產生）
 ```
 
 ## Donation

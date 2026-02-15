@@ -135,6 +135,11 @@ def chunk_message(text: str, max_chars: int = DISCORD_CHAR_LIMIT) -> list[str]:
 MAX_CONTEXT_CHARS = 8000  # 上下文最大字符數
 HISTORY_FILE = Path("conversation_history.json")
 
+# 長期記憶設定
+MEMORY_FILE = Path("memory.json")
+MAX_MEMORY_FACTS = 20  # 每用戶最多保留的事實數量
+MAX_MEMORY_CHARS = 1500  # 記憶注入上下文的最大字符數
+
 
 @dataclass
 class Message:
@@ -152,6 +157,14 @@ class ConversationState:
 # 每個用戶的對話狀態
 conversation_states: dict[int, ConversationState] = {}
 
+# 每個用戶的長期記憶
+user_memories: dict[int, list[str]] = {}
+
+
+def get_user_memory(user_id: int) -> list[str]:
+    """取得用戶的長期記憶"""
+    return user_memories.get(user_id, [])
+
 
 def get_conversation_state(user_id: int) -> ConversationState:
     """取得用戶的對話狀態，如果不存在則創建"""
@@ -164,16 +177,117 @@ def get_conversation_state(user_id: int) -> ConversationState:
 MESSAGES_TO_SUMMARIZE = 10  # 壓縮最舊的 5 輪
 MAX_SUMMARY_CHARS = 2000  # 摘要最大字符數
 
-SUMMARY_PROMPT = """請將以下對話摘要成重點，保留：
-- 用戶的偏好和設定
-- 重要的決策和結論
+SUMMARY_PROMPT = """請將以下對話處理成兩個部分：
+
+## PART 1: 對話摘要
+保留：
+- 討論的主題和結論
 - 待辦事項和承諾
 - 關鍵資訊（名字、日期、數字等）
+
+## PART 2: 長期記憶
+從對話中提取值得長期記住的用戶事實（跨對話仍有用的資訊），例如：
+- 用戶的偏好和習慣
+- 用戶的技術背景或專長
+- 用戶提到的重要個人資訊
+- 用戶做出的重要決策
+
+如果沒有值得記住的事實，PART 2 留空即可。
 
 對話內容：
 {conversation}
 
-請用繁體中文輸出簡潔的摘要（約 200-300 字）："""
+請嚴格按照以下格式輸出：
+
+===SUMMARY===
+（繁體中文摘要，約 200-300 字）
+
+===FACTS===
+- 事實1
+- 事實2
+（每行一個事實，用 - 開頭。沒有則留空）"""
+
+
+def parse_summary_and_facts(output: str) -> tuple[str, list[str]]:
+    """解析 Claude 輸出的摘要和事實
+
+    Returns:
+        (summary, facts) tuple
+    """
+    summary = ""
+    facts: list[str] = []
+
+    if "===SUMMARY===" in output and "===FACTS===" in output:
+        parts = output.split("===FACTS===")
+        summary_part = parts[0].split("===SUMMARY===")[-1].strip()
+        facts_part = parts[1].strip() if len(parts) > 1 else ""
+
+        summary = summary_part
+
+        for line in facts_part.split("\n"):
+            line = line.strip()
+            if line.startswith("- ") and len(line) > 2:
+                facts.append(line[2:].strip())
+    else:
+        # 格式不符，整個輸出當作摘要（向後相容）
+        summary = output.strip()
+
+    return summary, facts
+
+
+def merge_memory_facts(user_id: int, new_facts: list[str]):
+    """合併新事實到用戶的長期記憶，去重並限制數量"""
+    existing = user_memories.get(user_id, [])
+
+    for fact in new_facts:
+        fact = fact.strip()
+        if not fact:
+            continue
+        # 子字串去重
+        is_duplicate = any(
+            fact in existing_fact or existing_fact in fact
+            for existing_fact in existing
+        )
+        if not is_duplicate:
+            existing.append(fact)
+
+    # 保留最新的 MAX_MEMORY_FACTS 個事實
+    if len(existing) > MAX_MEMORY_FACTS:
+        existing = existing[-MAX_MEMORY_FACTS:]
+
+    user_memories[user_id] = existing
+
+
+def save_memory():
+    """儲存長期記憶到檔案"""
+    data = {
+        str(uid): {
+            "facts": facts,
+            "updated_at": datetime.now().isoformat(),
+        }
+        for uid, facts in user_memories.items()
+        if facts
+    }
+    try:
+        MEMORY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logger.error(f"Failed to save memory: {e}")
+
+
+def load_memory():
+    """從檔案載入長期記憶"""
+    if not MEMORY_FILE.exists():
+        return
+    try:
+        data = json.loads(MEMORY_FILE.read_text())
+        for uid, memory_data in data.items():
+            if isinstance(memory_data, dict):
+                user_memories[int(uid)] = memory_data.get("facts", [])
+            elif isinstance(memory_data, list):
+                user_memories[int(uid)] = memory_data
+        logger.info(f"Loaded memory for {len(data)} users")
+    except Exception as e:
+        logger.error(f"Failed to load memory: {e}")
 
 
 def save_history():
@@ -283,8 +397,12 @@ def compress_summary(summary: str) -> str:
         return summary  # 壓縮失敗則保留原摘要
 
 
-def generate_summary(messages: list[Message]) -> str:
-    """用 Claude 生成對話摘要（同步函數，會阻塞）"""
+def generate_summary(messages: list[Message]) -> tuple[str, list[str]]:
+    """用 Claude 生成對話摘要並提取長期事實（同步函數，會阻塞）
+
+    Returns:
+        (summary, new_facts) tuple
+    """
     conversation_text = "\n".join(
         f"{m.role.capitalize()}: {m.content}" for m in messages
     )
@@ -297,14 +415,16 @@ def generate_summary(messages: list[Message]) -> str:
             text=True,
             timeout=60,
         )
-        # 檢查返回碼
         if result.returncode != 0:
             logger.error(f"Summary generation CLI error: {result.stderr.strip()}")
-            return ""
-        return result.stdout.strip() or ""
+            return "", []
+        output = result.stdout.strip()
+        if output:
+            return parse_summary_and_facts(output)
+        return "", []
     except Exception as e:
         logger.error(f"Summary generation failed: {e}")
-        return ""
+        return "", []
 
 
 def maybe_compress_history(user_id: int):
@@ -316,9 +436,9 @@ def maybe_compress_history(user_id: int):
         to_summarize = state.messages[:MESSAGES_TO_SUMMARIZE]
         to_keep = state.messages[MESSAGES_TO_SUMMARIZE:]
 
-        # 生成新摘要（合併舊摘要）
+        # 生成新摘要並提取事實
         old_summary = state.summary
-        new_summary = generate_summary(to_summarize)
+        new_summary, new_facts = generate_summary(to_summarize)
 
         if new_summary:
             if old_summary:
@@ -336,6 +456,12 @@ def maybe_compress_history(user_id: int):
             save_history()
             logger.info(f"Compressed history for user {user_id}")
 
+        # 合併新事實到長期記憶
+        if new_facts:
+            merge_memory_facts(user_id, new_facts)
+            save_memory()
+            logger.info(f"Extracted {len(new_facts)} facts for user {user_id}")
+
 
 def build_context(user_id: int) -> str:
     """組合摘要 + 最近對話為上下文"""
@@ -347,6 +473,14 @@ def build_context(user_id: int) -> str:
 
     # 加入安全護欄
     parts.append(SAFETY_GUARDRAILS)
+
+    # 加入長期記憶
+    memory = get_user_memory(user_id)
+    if memory:
+        memory_text = "\n".join(f"- {fact}" for fact in memory)
+        if len(memory_text) > MAX_MEMORY_CHARS:
+            memory_text = memory_text[:MAX_MEMORY_CHARS] + "\n..."
+        parts.append(f"[Long-term memory about this user]\n{memory_text}")
 
     # 加入摘要
     if state.summary:
@@ -545,12 +679,18 @@ async def on_message(message: discord.Message):
 
     # 特殊命令：顯示說明
     if user_message.lower() in ["/help", "說明", "幫助"]:
-        help_text = """**可用指令：**
+        help_text = """**對話指令：**
 • `/help` 或 `說明` - 顯示此說明
-• `/clear` 或 `清除歷史` - 清除對話歷史和摘要
+• `/new` 或 `新對話` - 保存記憶並開始新對話
+• `/clear` 或 `清除歷史` - 清除對話歷史和摘要（保留長期記憶）
 • `/context` 或 `上下文` - 查看上下文狀態
 • `/summarize` - 手動生成摘要
 • `/summary` - 查看當前摘要
+
+**記憶指令：**
+• `/memory` 或 `記憶` - 查看長期記憶
+• `/forget` 或 `忘記` - 清除所有長期記憶
+• `/forget <編號>` - 刪除特定一條記憶
 
 **排程指令：**
 • `/cron list` - 列出所有排程任務
@@ -563,15 +703,106 @@ async def on_message(message: discord.Message):
 • `/daily <HH:MM> <提示>` - 每日觸發 Claude（如 `/daily 09:00 今日新聞`）
 
 **使用方式：**
-直接輸入訊息即可與 Claude 對話，Bot 會記住對話歷史。"""
+直接輸入訊息即可與 Claude 對話，Bot 會記住對話歷史。
+切換話題時建議使用 `/new`，會自動保存重要資訊到長期記憶。"""
         await message.channel.send(help_text)
         return
 
-    # 特殊命令：清除歷史和摘要
+    # 特殊命令：清除歷史和摘要（保留長期記憶）
     if user_message.lower() in ["/clear", "/reset", "清除歷史"]:
         conversation_states[message.author.id] = ConversationState()
         save_history()
-        await message.channel.send("✓ 對話歷史和摘要已清除")
+        await message.channel.send("✓ 對話歷史和摘要已清除（長期記憶已保留）")
+        return
+
+    # 特殊命令：新對話（保留長期記憶，提取事實後清除當前對話）
+    if user_message.lower() in ["/new", "新對話"]:
+        state = get_conversation_state(message.author.id)
+
+        # 至少 2 輪對話才值得提取
+        if len(state.messages) >= 4:
+            await message.channel.send("正在保存重要資訊到長期記憶...")
+            async with message.channel.typing():
+                loop = asyncio.get_running_loop()
+
+                def extract_and_clear():
+                    _, new_facts = generate_summary(state.messages)
+                    if new_facts:
+                        merge_memory_facts(message.author.id, new_facts)
+                        save_memory()
+                        return len(new_facts)
+                    return 0
+
+                fact_count = await loop.run_in_executor(executor, extract_and_clear)
+
+            conversation_states[message.author.id] = ConversationState()
+            save_history()
+
+            if fact_count > 0:
+                await message.channel.send(
+                    f"✓ 已提取 {fact_count} 條記憶並開始新對話"
+                )
+            else:
+                await message.channel.send("✓ 新對話已開始（長期記憶已保留）")
+        else:
+            conversation_states[message.author.id] = ConversationState()
+            save_history()
+            await message.channel.send("✓ 新對話已開始（長期記憶已保留）")
+        return
+
+    # 特殊命令：查看長期記憶
+    if user_message.lower() in ["/memory", "記憶"]:
+        memory = get_user_memory(message.author.id)
+        if memory:
+            memory_lines = [f"{i + 1}. {fact}" for i, fact in enumerate(memory)]
+            memory_text = "\n".join(memory_lines)
+            if len(memory_text) > 1800:
+                memory_text = memory_text[:1800] + "\n..."
+            await message.channel.send(
+                f"**長期記憶 ({len(memory)} 條)：**\n\n{memory_text}"
+            )
+        else:
+            await message.channel.send("目前沒有長期記憶")
+        return
+
+    # 特殊命令：清除特定記憶（帶參數，如 /forget 3）
+    if user_message.lower().startswith("/forget "):
+        arg = user_message[8:].strip()
+        memory = get_user_memory(message.author.id)
+
+        if not memory:
+            await message.channel.send("目前沒有長期記憶")
+            return
+
+        try:
+            idx = int(arg) - 1  # 用戶看到的是 1-based
+            if 0 <= idx < len(memory):
+                removed = memory.pop(idx)
+                save_memory()
+                await message.channel.send(f"✓ 已刪除記憶：{removed}")
+            else:
+                await message.channel.send(f"無效的編號，範圍是 1-{len(memory)}")
+        except ValueError:
+            if arg.lower() in ["all", "全部"]:
+                count = len(memory)
+                del user_memories[message.author.id]
+                save_memory()
+                await message.channel.send(f"✓ 已清除 {count} 條長期記憶")
+            else:
+                await message.channel.send(
+                    "用法：`/forget` 清除全部，`/forget 3` 刪除第 3 條"
+                )
+        return
+
+    # 特殊命令：清除全部長期記憶
+    if user_message.lower() in ["/forget", "忘記"]:
+        if message.author.id in user_memories and user_memories[message.author.id]:
+            count = len(user_memories[message.author.id])
+            del user_memories[message.author.id]
+            save_memory()
+            await message.channel.send(f"✓ 已清除 {count} 條長期記憶")
+        else:
+            await message.channel.send("目前沒有長期記憶需要清除")
         return
 
     # 特殊命令：查看上下文狀態
@@ -579,8 +810,9 @@ async def on_message(message: discord.Message):
         state = get_conversation_state(message.author.id)
         history_len = len(state.messages)
         has_summary = "有" if state.summary else "無"
+        memory_count = len(get_user_memory(message.author.id))
         await message.channel.send(
-            f"目前上下文：{history_len // 2} 輪對話，摘要：{has_summary}"
+            f"目前上下文：{history_len // 2} 輪對話，摘要：{has_summary}，長期記憶：{memory_count} 條"
         )
         return
 
@@ -594,7 +826,7 @@ async def on_message(message: discord.Message):
         await message.channel.send("正在生成摘要...")
         async with message.channel.typing():
             loop = asyncio.get_running_loop()
-            new_summary = await loop.run_in_executor(
+            new_summary, new_facts = await loop.run_in_executor(
                 executor, generate_summary, state.messages
             )
 
@@ -604,11 +836,18 @@ async def on_message(message: discord.Message):
             else:
                 state.summary = new_summary
             state.messages = []  # 清空已摘要的對話
+
+            # 合併新事實到長期記憶
+            if new_facts:
+                merge_memory_facts(message.author.id, new_facts)
+                save_memory()
+
             save_history()
             summary_preview = (
                 new_summary[:500] + "..." if len(new_summary) > 500 else new_summary
             )
-            await message.channel.send(f"✓ 摘要已生成：\n\n{summary_preview}")
+            fact_msg = f"\n\n提取了 {len(new_facts)} 條長期記憶" if new_facts else ""
+            await message.channel.send(f"✓ 摘要已生成：\n\n{summary_preview}{fact_msg}")
         else:
             await message.channel.send("摘要生成失敗")
         return
@@ -668,8 +907,9 @@ async def on_message(message: discord.Message):
 def main():
     if not DISCORD_BOT_TOKEN:
         raise ValueError("Please set DISCORD_BOT_TOKEN environment variable.")
-    # 啟動時載入歷史
+    # 啟動時載入歷史和記憶
     load_history()
+    load_memory()
     client.run(DISCORD_BOT_TOKEN)
 
 

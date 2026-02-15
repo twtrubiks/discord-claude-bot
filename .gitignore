@@ -25,3 +25,6 @@ conversation_history.json
 
 # Cron jobs
 cron_jobs.json
+
+# Long-term memory
+memory.json
