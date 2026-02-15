@@ -141,7 +141,7 @@ User: 幫我寫一個函數
 
 ---
 
-Current message from user:
+使用者目前的訊息：
 這個函數要能計算費氏數列
 ```
 

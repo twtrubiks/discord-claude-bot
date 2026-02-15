@@ -36,7 +36,6 @@ ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "")
 
 # 可配置的對話管理參數
 MAX_MESSAGES_BEFORE_COMPRESS = int(os.environ.get("MAX_MESSAGES_BEFORE_COMPRESS", "16"))
-MAX_CONTEXT_MESSAGES = int(os.environ.get("MAX_CONTEXT_MESSAGES", "16"))
 
 # 系統 prompt
 SAFETY_GUARDRAILS = """你是一個 Discord 上的個人 AI 助手。
@@ -243,11 +242,7 @@ def merge_memory_facts(user_id: int, new_facts: list[str]):
         fact = fact.strip()
         if not fact:
             continue
-        # 子字串去重
-        is_duplicate = any(
-            fact in existing_fact or existing_fact in fact
-            for existing_fact in existing
-        )
+        is_duplicate = fact in existing
         if not is_duplicate:
             existing.append(fact)
 
@@ -525,13 +520,13 @@ async def ask_claude(user_id: int, message: str, max_retries: int = 3, timeout: 
     context = build_context(user_id)
 
     if context:
-        full_prompt = f"""Previous conversation:
+        full_prompt = f"""先前的對話紀錄：
 {context}
 
-Current message from user:
+使用者目前的訊息：
 {message}
 
-Please respond to the current message, taking into account the conversation history above."""
+請根據以上對話紀錄，回應使用者目前的訊息。"""
     else:
         full_prompt = message
 
