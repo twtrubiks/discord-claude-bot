@@ -9,11 +9,12 @@
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Callable, Awaitable
 import uuid
+from zoneinfo import ZoneInfo
 
 from apscheduler import AsyncScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -127,7 +128,11 @@ class CronScheduler:
         self._claude_invoker = claude_invoker
 
     async def start(self):
-        """啟動排程器"""
+        """啟動排程器（含重複啟動防護）"""
+        if self._scheduler is not None:
+            logger.warning("Cron scheduler already running, skipping duplicate start")
+            return
+
         self._load_jobs()
         self._scheduler = AsyncScheduler()
 
@@ -179,11 +184,14 @@ class CronScheduler:
             return DateTrigger(run_time=run_time)
 
         elif schedule.kind == ScheduleKind.EVERY:
-            # 定期任務
-            return IntervalTrigger(seconds=schedule.every_seconds)
+            # 定期任務 — 設定 start_time 為「現在 + 間隔」，避免重啟時立即觸發
+            tz = ZoneInfo(schedule.timezone)
+            start = datetime.now(tz=tz) + timedelta(seconds=schedule.every_seconds)
+            return IntervalTrigger(seconds=schedule.every_seconds, start_time=start)
 
         elif schedule.kind == ScheduleKind.CRON:
-            # Cron 表達式
+            # Cron 表達式 — 明確使用排程時區的 start_time，避免伺服器時區 (UTC) 與排程時區不一致
+            tz = ZoneInfo(schedule.timezone)
             parts = schedule.cron_expr.split()
             if len(parts) == 5:
                 minute, hour, day, month, day_of_week = parts
@@ -194,6 +202,7 @@ class CronScheduler:
                     month=month,
                     day_of_week=day_of_week,
                     timezone=schedule.timezone,
+                    start_time=datetime.now(tz=tz),
                 )
             else:
                 raise ValueError(f"Invalid cron expression: {schedule.cron_expr}")
