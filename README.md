@@ -8,7 +8,7 @@
 
 ## 功能
 
-- 與 Claude AI 對話
+- 與 Claude AI 對話（使用 Claude Code 訂閱額度，無需另購 API Key）
 - 對話歷史管理與自動摘要
 - 長期記憶（跨對話記住用戶偏好與重要資訊）
 - 排程任務（一次性提醒、定期觸發、每日排程）
@@ -59,7 +59,7 @@ python bot_discord.py
 - `/every <間隔> <訊息>` - 定期觸發（如 `/every 1h 喝水`）
 - `/daily <HH:MM> <提示>` - 每日觸發 Claude（如 `/daily 09:00 今日新聞`）
 - `/cron list` - 列出所有排程
-- `/cron info <id>` - 查看任務詳情
+- `/cron info <id>` - 查看任務詳情（含完整提示詞，過長自動分段）
 - `/cron remove <id>` - 刪除任務
 - `/cron toggle <id>` - 啟用/停用任務
 - `/cron test <id>` - 立即執行測試
@@ -223,7 +223,7 @@ User: 幫我寫一個函數
 
 ### 記憶如何產生
 
-長期記憶主要搭載在摘要流程中萃取；其中 `/new` 在符合條件時會額外呼叫一次 Claude 萃取長期記憶條目：
+長期記憶主要在摘要流程中提取；另外，當 `/new` 符合條件時，會額外呼叫一次 Claude 來提取長期記憶條目：
 
 1. **自動壓縮時**：當訊息數 >= `MAX_MESSAGES_BEFORE_COMPRESS`（預設 16）時，`generate_summary()` 會同時產生摘要和長期記憶條目
 2. **手動 `/summarize` 時**：同樣會順便萃取長期記憶條目
@@ -294,23 +294,6 @@ on_message (async, 主執行緒/事件循環)
                     ├── merge_memory_facts() + save_memory() ← 同步，檔案 I/O
                     └── save_history()      ← 同步，檔案 I/O
 ```
-
-### 執行位置說明
-
-| 層級 | 執行位置 | 是否阻塞事件循環 |
-|------|----------|------------------|
-| `on_message` | 主執行緒（事件循環） | 否（async） |
-| `ask_claude` | 主執行緒（事件循環） | 否（async） |
-| `run_claude_sync` | 執行緒池 | 否 |
-| `save_history`（ask_claude 內） | 主執行緒 | 是（毫秒級，可忽略） |
-| `maybe_compress_history` | 執行緒池 | 否 |
-| `generate_summary` | 執行緒池（同一執行緒） | 否 |
-| `compress_summary` | 執行緒池（同一執行緒） | 否 |
-| `merge_memory_facts` | 執行緒池（同一執行緒） | 否 |
-| `save_memory`（壓縮流程內） | 執行緒池 | 否 |
-| `save_history`（壓縮流程內） | 執行緒池 | 否 |
-
-`maybe_compress_history` 整個函數（包含內部的 subprocess 和檔案 I/O）都在執行緒池中執行，不會阻塞 Discord 的事件循環，確保 heartbeat 正常運作。
 
 > **註**：`ask_claude` 中的 `save_history()` 在主執行緒執行，但檔案 I/O 通常只需 1-10 毫秒，遠低於 Discord heartbeat 的容忍範圍（數秒），因此不影響 bot 穩定性。
 

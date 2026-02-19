@@ -219,13 +219,17 @@ def format_job_info(job: CronJob) -> str:
     status = "啟用" if job.enabled else "停用"
     schedule_str = format_schedule(job.schedule)
     invoke_str = "觸發 Claude" if job.invoke_claude else "純訊息"
+    message_text = job.message if job.message else "(空白)"
 
     return f"""**任務 ID**: `{job.id}`
 **狀態**: {status}
 **類型**: {invoke_str}
 **排程**: {schedule_str}
 **描述**: {job.description or '無'}
-**訊息**: {job.message[:100]}{'...' if len(job.message) > 100 else ''}
+**訊息**:
+```text
+{message_text}
+```
 **建立時間**: {job.created_at.strftime('%Y-%m-%d %H:%M:%S')}"""
 
 
@@ -245,7 +249,7 @@ async def handle_cron_command(
 
     子指令：
     - list: 列出所有任務
-    - info <id>: 查看任務詳情
+    - info <id>: 查看任務詳情（含完整提示詞）
     - remove <id>: 刪除任務
     - toggle <id>: 切換啟用狀態
     - test <id>: 立即執行測試
@@ -253,7 +257,7 @@ async def handle_cron_command(
     if not args:
         return """**Cron 排程指令：**
 • `/cron list` - 列出所有排程任務
-• `/cron info <id>` - 查看任務詳情
+• `/cron info <id>` - 查看任務詳情（含完整提示詞）
 • `/cron remove <id>` - 刪除任務
 • `/cron toggle <id>` - 啟用/停用任務
 • `/cron test <id>` - 立即執行測試"""

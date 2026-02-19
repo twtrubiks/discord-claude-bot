@@ -690,7 +690,7 @@ async def on_message(message: discord.Message):
 
 **排程指令：**
 • `/cron list` - 列出所有排程任務
-• `/cron info <id>` - 查看任務詳情
+• `/cron info <id>` - 查看任務詳情（含完整提示詞）
 • `/cron remove <id>` - 刪除任務
 • `/cron toggle <id>` - 啟用/停用任務
 • `/cron test <id>` - 立即執行測試
@@ -866,25 +866,29 @@ async def on_message(message: discord.Message):
     if user_message.lower().startswith("/cron"):
         args = user_message.split()[1:]
         response = await handle_cron_command("cron", args, message.channel.id, message.author.id)
-        await message.channel.send(response)
+        for chunk in chunk_message(response):
+            await message.channel.send(chunk)
         return
 
     if user_message.lower().startswith("/remind"):
         args = user_message.split()[1:]
         response = await handle_remind_command(args, message.channel.id, message.author.id)
-        await message.channel.send(response)
+        for chunk in chunk_message(response):
+            await message.channel.send(chunk)
         return
 
     if user_message.lower().startswith("/every"):
         args = user_message.split()[1:]
         response = await handle_every_command(args, message.channel.id, message.author.id)
-        await message.channel.send(response)
+        for chunk in chunk_message(response):
+            await message.channel.send(chunk)
         return
 
     if user_message.lower().startswith("/daily"):
         args = user_message.split()[1:]
         response = await handle_daily_command(args, message.channel.id, message.author.id)
-        await message.channel.send(response)
+        for chunk in chunk_message(response):
+            await message.channel.send(chunk)
         return
 
     logger.info(f"User {message.author.id}: {user_message[:50]}...")
