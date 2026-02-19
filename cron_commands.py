@@ -14,6 +14,7 @@ import subprocess
 from datetime import datetime, timedelta
 from typing import Optional
 
+from claude_cli import build_claude_command
 from cron_scheduler import (
     cron_scheduler,
     CronJob,
@@ -177,7 +178,7 @@ async def generate_schedule_description_with_ai(
 
     def run_claude_sync() -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["claude", "-p", prompt],
+            build_claude_command(prompt),
             capture_output=True,
             text=True,
             timeout=timeout,

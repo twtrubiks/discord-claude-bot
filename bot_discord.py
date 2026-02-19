@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import discord
 from dotenv import load_dotenv
 
+from claude_cli import build_claude_command
 from cron_scheduler import cron_scheduler
 from cron_commands import (
     handle_cron_command,
@@ -373,7 +374,7 @@ def compress_summary(summary: str) -> str:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt],
+            build_claude_command(prompt),
             capture_output=True,
             text=True,
             timeout=60,
@@ -405,7 +406,7 @@ def generate_summary(messages: list[Message]) -> tuple[str, list[str]]:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt],
+            build_claude_command(prompt),
             capture_output=True,
             text=True,
             timeout=60,
@@ -533,7 +534,7 @@ async def ask_claude(user_id: int, message: str, max_retries: int = 3, timeout: 
     def run_claude_sync() -> subprocess.CompletedProcess:
         """同步執行 Claude CLI（在執行緒池中執行）"""
         return subprocess.run(
-            ["claude", "-p", full_prompt],
+            build_claude_command(full_prompt),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -616,7 +617,7 @@ async def invoke_claude_for_channel(channel_id: int, _user_id: int, prompt: str,
     def run_claude_sync() -> subprocess.CompletedProcess:
         """同步執行 Claude CLI（在執行緒池中執行）"""
         return subprocess.run(
-            ["claude", "-p", prompt],
+            build_claude_command(prompt),
             capture_output=True,
             text=True,
             timeout=timeout,

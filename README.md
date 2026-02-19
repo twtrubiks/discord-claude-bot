@@ -85,7 +85,7 @@ ask_claude(user_id, message)
         ├─ 組合上下文（長期記憶 + 摘要 + 歷史）
         │
         ▼
-subprocess.run(["claude", "-p", prompt])
+subprocess.run(["claude", "-p", prompt, "--permission-mode", "bypassPermissions"])
         │  （含重試機制：最多 3 次）
         ▼
 取得回應 + 儲存對話歷史
@@ -316,14 +316,22 @@ on_message (async, 主執行緒/事件循環)
 
 ## Claude API 呼叫方式
 
-本專案使用 `claude -p` CLI 呼叫方式，而非直接呼叫 HTTP API。
+本專案使用 `claude -p "prompt" --permission-mode bypassPermissions` CLI 呼叫方式，而非直接呼叫 HTTP API。
 
 ### 兩種呼叫方式比較
 
 | 方式 | 說明 |
 |------|------|
-| **`claude -p "prompt"`** | 透過 Claude Code CLI 呼叫，使用訂閱額度 |
+| **`claude -p "prompt" --permission-mode bypassPermissions`** | 透過 Claude Code CLI 呼叫，使用訂閱額度 |
 | **HTTP API** | 直接呼叫 `api.anthropic.com`，需要 API Key 付費 |
+
+### 權限模式設定（Skill / MCP）
+
+為了讓 Bot 在觸發 Claude Code skill 或 MCP 時更順利執行，本專案預設使用：
+
+`claude -p "prompt" --permission-mode bypassPermissions`
+
+如果你想自己手動維護權限，請到 `claude_cli.py` 的 `build_claude_command()`，把 `--permission-mode bypassPermissions` 這段程式拿掉即可。
 
 ### 為什麼選擇 `claude -p`
 
@@ -347,7 +355,7 @@ and cannot be used for other API requests."
 | **參數控制受限** | 無法精細調整 temperature、top_p 等參數 |
 | **併發能力差** | 同時處理多個請求較困難 |
 | **錯誤處理困難** | 難以捕捉和處理結構化的 API 錯誤 |
-| **無 Tool Use** | 無法使用 function calling 功能 |
+| **非 API Function Calling** | 可用 Claude Code Skill / MCP，但不等同 API function calling |
 
 ### HTTP API 的優勢（但需付費）
 
@@ -356,7 +364,8 @@ and cannot be used for other API requests."
 | 即時串流回覆 | ❌ | ✅ |
 | 多用戶併發 | ⚠️ 受限 | ✅ |
 | 結構化回應 | ❌ | ✅ |
-| Tool Use / Function Calling | ❌ | ✅ |
+| Claude Code Skill / MCP | ✅（搭配 `bypassPermissions`） | ❌ |
+| API Function Calling | ❌ | ✅ |
 | 精細參數控制 | ❌ | ✅ |
 | 使用訂閱額度 | ✅ | ❌ |
 
@@ -368,6 +377,7 @@ and cannot be used for other API requests."
 
 ```
 bot_discord.py              # 主程式
+claude_cli.py               # Claude CLI 指令組裝（含 permission mode）
 cron_scheduler.py           # 排程核心
 cron_commands.py            # 排程命令處理
 conversation_history.json   # 對話歷史（自動產生）
