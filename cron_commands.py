@@ -7,7 +7,10 @@
 - /daily <HH:MM> <提示>
 """
 
+import asyncio
+import logging
 import re
+import subprocess
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -19,6 +22,12 @@ from cron_scheduler import (
     generate_job_id,
     MIN_INTERVAL_SECONDS,
 )
+
+logger = logging.getLogger(__name__)
+
+DESCRIPTION_AI_TIMEOUT_SECONDS = 5
+DESCRIPTION_MAX_CHARS = 30
+DESCRIPTION_INPUT_MAX_CHARS = 300
 
 
 def parse_duration(duration_str: str) -> Optional[int]:
@@ -99,6 +108,109 @@ def format_schedule(schedule: ScheduleConfig) -> str:
         return f"Cron: {schedule.cron_expr} ({schedule.timezone})"
 
     return "未知"
+
+
+def build_fallback_description(
+    kind: ScheduleKind, content: str, time_hint: Optional[str] = None
+) -> str:
+    """建立降級用的任務描述（AI 失敗時使用）"""
+    if kind == ScheduleKind.AT:
+        return f"提醒: {content[:30]}"
+    if kind == ScheduleKind.EVERY:
+        return f"定期: {content[:30]}"
+    if kind == ScheduleKind.CRON:
+        return f"每日 {time_hint or ''}: {content[:20]}".strip()
+    return content[:30]
+
+
+def sanitize_generated_description(text: str) -> str:
+    """清理 AI 產生的描述，確保為單行短標題"""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    # Claude 有時會輸出多行，取第一行作為標題
+    title = lines[0]
+    title = title.strip("`\"' ")
+    title = re.sub(r"^[-*•\s]+", "", title)
+    title = re.sub(r"^(描述|標題)\s*[:：]\s*", "", title)
+    title = re.sub(r"\s+", " ", title).strip()
+
+    if len(title) > DESCRIPTION_MAX_CHARS:
+        title = title[:DESCRIPTION_MAX_CHARS].rstrip()
+
+    return title
+
+
+async def generate_schedule_description_with_ai(
+    kind: ScheduleKind,
+    user_input: str,
+    schedule_text: str,
+    timeout: int = DESCRIPTION_AI_TIMEOUT_SECONDS,
+) -> Optional[str]:
+    """用 Claude 生成排程短描述，失敗時回傳 None"""
+    if not user_input.strip():
+        return None
+
+    kind_text = {
+        ScheduleKind.AT: "一次性提醒",
+        ScheduleKind.EVERY: "定期觸發",
+        ScheduleKind.CRON: "每日排程",
+    }.get(kind, "排程任務")
+
+    trimmed_input = user_input.strip()[:DESCRIPTION_INPUT_MAX_CHARS]
+
+    prompt = f"""你是文案助手。請為排程任務產生一個單行短標題。
+
+規則：
+- 使用繁體中文
+- 僅輸出一行標題
+- 10-24 字，最多 {DESCRIPTION_MAX_CHARS} 字
+- 不要引號、emoji、編號、前綴（例如「描述：」）
+- 要能看出任務用途（必要時包含時間語意）
+
+任務類型：{kind_text}
+排程資訊：{schedule_text}
+原始內容：{trimmed_input}
+
+只輸出標題："""
+
+    def run_claude_sync() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, run_claude_sync),
+            timeout=timeout + 1,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("AI description generation outer timeout")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning("AI description generation timeout")
+        return None
+    except FileNotFoundError:
+        logger.warning("claude CLI not found; fallback description used")
+        return None
+    except Exception as e:
+        logger.warning(f"AI description generation failed: {e}")
+        return None
+
+    if result.returncode != 0:
+        logger.warning(
+            "AI description generation returned non-zero exit code: %s",
+            result.stderr.strip() or result.returncode,
+        )
+        return None
+
+    cleaned = sanitize_generated_description(result.stdout)
+    return cleaned or None
 
 
 def format_job_info(job: CronJob) -> str:
@@ -227,6 +339,17 @@ async def handle_remind_command(
     # 計算執行時間
     run_time = datetime.now() + timedelta(seconds=seconds)
     timestamp_ms = int(run_time.timestamp() * 1000)
+    schedule = ScheduleConfig(
+        kind=ScheduleKind.AT,
+        at_timestamp=timestamp_ms,
+    )
+    schedule_text = format_schedule(schedule)
+    fallback_description = build_fallback_description(ScheduleKind.AT, message)
+    ai_description = await generate_schedule_description_with_ai(
+        kind=ScheduleKind.AT,
+        user_input=message,
+        schedule_text=schedule_text,
+    )
 
     # 建立任務
     job = CronJob(
@@ -234,17 +357,18 @@ async def handle_remind_command(
         channel_id=channel_id,
         user_id=user_id,
         message=message,
-        schedule=ScheduleConfig(
-            kind=ScheduleKind.AT,
-            at_timestamp=timestamp_ms,
-        ),
+        schedule=schedule,
         invoke_claude=True,
-        description=f"提醒: {message[:30]}",
+        description=ai_description or fallback_description,
     )
 
     await cron_scheduler.add_job(job)
 
-    return f"✓ 已設定提醒：{run_time.strftime('%Y-%m-%d %H:%M:%S')}\n任務 ID：`{job.id}`"
+    return (
+        f"✓ 已設定提醒：{run_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"描述：{job.description}\n"
+        f"任務 ID：`{job.id}`"
+    )
 
 
 async def handle_every_command(
@@ -267,6 +391,17 @@ async def handle_every_command(
 
     if seconds < MIN_INTERVAL_SECONDS:
         return f"間隔時間不能少於 {MIN_INTERVAL_SECONDS} 秒"
+    schedule = ScheduleConfig(
+        kind=ScheduleKind.EVERY,
+        every_seconds=seconds,
+    )
+    schedule_text = format_schedule(schedule)
+    fallback_description = build_fallback_description(ScheduleKind.EVERY, message)
+    ai_description = await generate_schedule_description_with_ai(
+        kind=ScheduleKind.EVERY,
+        user_input=message,
+        schedule_text=schedule_text,
+    )
 
     # 建立任務
     job = CronJob(
@@ -274,17 +409,18 @@ async def handle_every_command(
         channel_id=channel_id,
         user_id=user_id,
         message=message,
-        schedule=ScheduleConfig(
-            kind=ScheduleKind.EVERY,
-            every_seconds=seconds,
-        ),
+        schedule=schedule,
         invoke_claude=True,
-        description=f"定期: {message[:30]}",
+        description=ai_description or fallback_description,
     )
 
     await cron_scheduler.add_job(job)
 
-    return f"✓ 已設定定期訊息：{format_schedule(job.schedule)}\n任務 ID：`{job.id}`"
+    return (
+        f"✓ 已設定定期訊息：{format_schedule(job.schedule)}\n"
+        f"描述：{job.description}\n"
+        f"任務 ID：`{job.id}`"
+    )
 
 
 async def handle_daily_command(
@@ -309,6 +445,20 @@ async def handle_daily_command(
 
     # 建立 Cron 表達式
     cron_expr = f"{minute} {hour} * * *"
+    schedule = ScheduleConfig(
+        kind=ScheduleKind.CRON,
+        cron_expr=cron_expr,
+        timezone="Asia/Taipei",
+    )
+    schedule_text = f"每日 {time_str} ({schedule.timezone})"
+    fallback_description = build_fallback_description(
+        ScheduleKind.CRON, prompt, time_hint=time_str
+    )
+    ai_description = await generate_schedule_description_with_ai(
+        kind=ScheduleKind.CRON,
+        user_input=prompt,
+        schedule_text=schedule_text,
+    )
 
     # 建立任務
     job = CronJob(
@@ -316,15 +466,16 @@ async def handle_daily_command(
         channel_id=channel_id,
         user_id=user_id,
         message=prompt,
-        schedule=ScheduleConfig(
-            kind=ScheduleKind.CRON,
-            cron_expr=cron_expr,
-            timezone="Asia/Taipei",
-        ),
+        schedule=schedule,
         invoke_claude=True,  # daily 指令預設觸發 Claude
-        description=f"每日 {time_str}: {prompt[:20]}",
+        description=ai_description or fallback_description,
     )
 
     await cron_scheduler.add_job(job)
 
-    return f"✓ 已設定每日任務：每天 {time_str} 觸發 Claude\n提示詞：{prompt[:50]}{'...' if len(prompt) > 50 else ''}\n任務 ID：`{job.id}`"
+    return (
+        f"✓ 已設定每日任務：每天 {time_str} 觸發 Claude\n"
+        f"描述：{job.description}\n"
+        f"提示詞：{prompt[:50]}{'...' if len(prompt) > 50 else ''}\n"
+        f"任務 ID：`{job.id}`"
+    )

@@ -10,8 +10,8 @@
 
 - 與 Claude AI 對話
 - 對話歷史管理與自動摘要
-- 長期記憶（跨對話記住用戶偏好與重要事實）
-- 排程任務（一次性提醒、定期訊息、每日排程）
+- 長期記憶（跨對話記住用戶偏好與重要資訊）
+- 排程任務（一次性提醒、定期觸發、每日排程）
 
 ## 安裝
 
@@ -25,7 +25,10 @@ pip install -r requirements.txt
 
 ```
 DISCORD_BOT_TOKEN=你的_Discord_Bot_Token
+# 選填：用戶白名單，逗號分隔；留空代表不啟用白名單（所有人可用）
 ALLOWED_USER_IDS=用戶ID1,用戶ID2
+# 選填：達到此訊息數時觸發自動壓縮（預設 16）
+MAX_MESSAGES_BEFORE_COMPRESS=16
 ```
 
 ## 使用方式
@@ -52,10 +55,14 @@ python bot_discord.py
 - `/forget <編號>` - 刪除特定一條記憶
 
 **排程**
-- `/remind <時間> <訊息>` - 一次性提醒（如 `/remind 30m 開會`）
-- `/every <間隔> <訊息>` - 定期訊息（如 `/every 1h 喝水`）
-- `/daily <HH:MM> <提示>` - 每日排程
+- `/remind <時間> <訊息>` - 一次性提醒（如 `/remind 30m 開會`，到時觸發 Claude）
+- `/every <間隔> <訊息>` - 定期觸發（如 `/every 1h 喝水`）
+- `/daily <HH:MM> <提示>` - 每日觸發 Claude（如 `/daily 09:00 今日新聞`）
 - `/cron list` - 列出所有排程
+- `/cron info <id>` - 查看任務詳情
+- `/cron remove <id>` - 刪除任務
+- `/cron toggle <id>` - 啟用/停用任務
+- `/cron test <id>` - 立即執行測試
 
 ## 架構
 
@@ -69,7 +76,8 @@ on_message() 接收
         ├─ 不在白名單？    → 回應「未授權」
         ├─ 空訊息？        → 忽略
         ├─ 特殊指令？      → 對應處理
-        │   (/help, /new, /clear, /memory, /forget, /cron, /remind...)
+        │   (/help, /new, /clear, /context, /summarize, /summary,
+        │    /memory, /forget, /cron, /remind, /every, /daily...)
         │
         ▼
 ask_claude(user_id, message)
@@ -98,7 +106,7 @@ chunk_message() 分塊處理（代碼塊感知）
 - `Message` dataclass：儲存單條訊息（role, content, timestamp）
 - `ConversationState` dataclass：儲存對話狀態（summary 摘要 + messages 最近對話）
 - `conversation_states`：以 user_id 為 key 的字典，每個用戶擁有獨立的對話狀態
-- `user_memories`：以 user_id 為 key 的字典，儲存每個用戶的長期記憶（事實列表）
+- `user_memories`：以 user_id 為 key 的字典，儲存每個用戶的長期記憶條目（程式欄位名為 `facts`）
 
 ### 對話格式設計
 
@@ -168,9 +176,9 @@ User: 幫我寫一個函數
 |------|-----|------|
 | `MAX_CONTEXT_CHARS` | 8000 | 送給 Claude 的上下文最大字元數 |
 | `MAX_SUMMARY_CHARS` | 2000 | 摘要最大字元數 |
-| `MAX_MEMORY_FACTS` | 20 | 每用戶最多保留的長期記憶事實數量 |
+| `MAX_MEMORY_FACTS` | 20 | 每用戶最多保留的長期記憶條目數量 |
 | `MAX_MEMORY_CHARS` | 1500 | 記憶注入上下文的最大字符數 |
-| 壓縮觸發門檻 | 16 條訊息 | 超過此數量觸發自動壓縮 |
+| 壓縮觸發門檻 | 預設 16 條訊息 | 超過此數量觸發自動壓縮（可由 `MAX_MESSAGES_BEFORE_COMPRESS` 調整） |
 
 ### 運作流程
 
@@ -185,21 +193,21 @@ User: 幫我寫一個函數
     │                 （從最新往回取）
     │                 包含：長期記憶 + 摘要 + 最近對話
     ▼
-檢查 len(messages) >= 16？
+檢查 len(messages) >= MAX_MESSAGES_BEFORE_COMPRESS（預設 16）？
     │
     ├─ 否 → 繼續
     │
     └─ 是 → 觸發壓縮
               │
               ├─ 取最舊 10 條訊息
-              ├─ 呼叫 Claude 生成摘要 + 提取事實
+              ├─ 呼叫 Claude 生成摘要 + 萃取長期記憶條目
               ├─ 合併摘要到現有 summary
               │     │
               │     └─ 超過 2000 字？→ 再壓縮
               │
-              ├─ 合併事實到長期記憶 (memory.json)
+              ├─ 合併長期記憶條目到長期記憶 (memory.json)
               │
-              └─ 保留最新 6 條訊息
+              └─ 保留未摘要的其餘訊息（預設門檻 16 時通常剩 6 條）
 ```
 
 ## 長期記憶
@@ -211,15 +219,15 @@ User: 幫我寫一個函數
 | 層級 | 用途 | 生命週期 | 儲存位置 |
 |------|------|----------|----------|
 | **摘要 (summary)** | 單次對話內的上下文壓縮 | `/clear` 或 `/new` 時清除 | `conversation_history.json` |
-| **長期記憶 (memory)** | 跨對話的用戶事實 | 永久保留，需 `/forget` 清除 | `memory.json` |
+| **長期記憶 (memory)** | 跨對話的用戶長期資訊 | 永久保留，需 `/forget` 清除 | `memory.json` |
 
 ### 記憶如何產生
 
-長期記憶的提取**不會產生額外的 Claude 呼叫**，而是搭載在現有的壓縮流程中：
+長期記憶主要搭載在摘要流程中萃取；其中 `/new` 在符合條件時會額外呼叫一次 Claude 萃取長期記憶條目：
 
-1. **自動壓縮時**：當訊息數 >= 16，`generate_summary()` 會同時提取摘要和事實
-2. **手動 `/summarize` 時**：同樣會順便提取事實
-3. **`/new` 時**：如果當前有 >= 4 條訊息，會呼叫一次 Claude 提取事實後再清空
+1. **自動壓縮時**：當訊息數 >= `MAX_MESSAGES_BEFORE_COMPRESS`（預設 16）時，`generate_summary()` 會同時產生摘要和長期記憶條目
+2. **手動 `/summarize` 時**：同樣會順便萃取長期記憶條目
+3. **`/new` 時**：如果當前有 >= 4 條訊息，會呼叫一次 Claude 萃取長期記憶條目後再清空
 
 ### 記憶儲存格式
 
@@ -240,8 +248,8 @@ User: 幫我寫一個函數
 
 ### 記憶管理
 
-- **去重**：新事實與已有事實做子字串比對，避免重複
-- **上限**：每用戶最多 20 條事實，超過時淘汰最舊的
+- **去重**：僅做「完全相同字串」去重，不做子字串或語意去重
+- **上限**：每用戶最多 20 條長期記憶條目，超過時淘汰最舊的
 - **手動管理**：
   - `/memory` 查看所有記憶（帶編號）
   - `/forget 3` 刪除第 3 條
@@ -253,7 +261,7 @@ User: 幫我寫一個函數
 |---|---|---|
 | 清除對話歷史 | 是 | 是 |
 | 清除摘要 | 是 | 是 |
-| 提取長期記憶 | 是（>= 4 條訊息時） | 否 |
+| 萃取長期記憶條目 | 是（>= 4 條訊息時） | 否 |
 | 清除長期記憶 | 否 | 否 |
 | 適用場景 | 切換話題（推薦） | 完全重置對話 |
 
@@ -281,7 +289,7 @@ on_message (async, 主執行緒/事件循環)
             │
             └── run_in_executor(maybe_compress_history) ← 執行緒池
                     │
-                    ├── generate_summary()  ← 同步，subprocess（同時提取事實）
+                    ├── generate_summary()  ← 同步，subprocess（同時萃取長期記憶條目）
                     ├── compress_summary()  ← 同步，subprocess
                     ├── merge_memory_facts() + save_memory() ← 同步，檔案 I/O
                     └── save_history()      ← 同步，檔案 I/O
@@ -364,6 +372,7 @@ cron_scheduler.py           # 排程核心
 cron_commands.py            # 排程命令處理
 conversation_history.json   # 對話歷史（自動產生）
 memory.json                 # 長期記憶（自動產生）
+cron_jobs.json              # 排程任務（自動產生）
 ```
 
 ## Donation
