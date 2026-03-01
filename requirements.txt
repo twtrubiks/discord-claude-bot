@@ -1,3 +1,4 @@
-discord.py==2.6.4
+discord.py==2.7.0
 python-dotenv==1.1.1
 apscheduler>=4.0.0a5
+groq

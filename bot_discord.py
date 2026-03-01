@@ -16,6 +16,7 @@ import discord
 from dotenv import load_dotenv
 
 from claude_cli import build_claude_command
+from speech_to_text import transcribe
 from cron_scheduler import cron_scheduler
 from cron_commands import (
     handle_cron_command,
@@ -139,6 +140,10 @@ HISTORY_FILE = Path("conversation_history.json")
 MEMORY_FILE = Path("memory.json")
 MAX_MEMORY_FACTS = 20  # 每用戶最多保留的事實數量
 MAX_MEMORY_CHARS = 1500  # 記憶注入上下文的最大字符數
+
+# 語音訊息儲存目錄
+VOICE_DIR = Path("voice_messages")
+VOICE_DIR.mkdir(exist_ok=True)
 
 
 @dataclass
@@ -665,6 +670,49 @@ async def on_message(message: discord.Message):
     if not is_authorized(message.author.id):
         await message.channel.send("You are not authorized to use this bot.")
         logger.warning(f"Unauthorized access attempt from user_id={message.author.id}")
+        return
+
+    # 語音訊息：儲存 → 轉錄 → Claude 回應
+    if message.flags.voice and message.attachments:
+        attachment = message.attachments[0]
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = VOICE_DIR / f"voice_{message.author.name}_{ts}.ogg"
+        await attachment.save(filename)
+        duration = f"（{attachment.duration:.1f} 秒）" if attachment.duration else ""
+        logger.info(f"Voice message saved: {filename}")
+
+        # 檢查是否有 GROQ_API_KEY
+        if not os.environ.get("GROQ_API_KEY"):
+            await message.channel.send(
+                f"語音已儲存：`{filename}`{duration}\n（未設定 GROQ_API_KEY，無法轉錄語音）"
+            )
+            return
+
+        # 轉錄語音
+        await message.channel.send(f"語音已儲存{duration}，轉錄中...")
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                executor, transcribe, str(filename)
+            )
+            transcribed_text = result.text.strip()
+        except Exception as e:
+            logger.error(f"Voice transcription failed: {e}")
+            await message.channel.send(f"語音轉錄失敗：{e}\n語音檔已保留：`{filename}`")
+            return
+
+        if not transcribed_text:
+            await message.channel.send("無法辨識語音內容，請重新錄製")
+            return
+
+        await message.channel.send(f"**語音轉錄：** {transcribed_text}")
+
+        # 送給 Claude 回應
+        async with message.channel.typing():
+            response = await ask_claude(message.author.id, transcribed_text)
+
+        for chunk in chunk_message(response):
+            await message.channel.send(chunk)
         return
 
     user_message = message.content.strip()

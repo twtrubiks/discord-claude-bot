@@ -28,3 +28,6 @@ cron_jobs.json
 
 # Long-term memory
 memory.json
+
+# Voice messages
+voice_messages/

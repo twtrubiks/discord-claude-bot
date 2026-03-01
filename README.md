@@ -12,6 +12,7 @@
 - 對話歷史管理與自動摘要
 - 長期記憶（跨對話記住用戶偏好與重要資訊）
 - 排程任務（一次性提醒、定期觸發、每日排程）
+- 語音訊息轉文字（透過 Groq Whisper API 轉錄後自動交給 Claude 回應）
 
 ## 安裝
 
@@ -27,6 +28,8 @@ pip install -r requirements.txt
 DISCORD_BOT_TOKEN=你的_Discord_Bot_Token
 # 選填：用戶白名單，逗號分隔；留空代表不啟用白名單（所有人可用）
 ALLOWED_USER_IDS=用戶ID1,用戶ID2
+# 選填：Groq API Key（語音轉文字功能，未設定時語音訊息僅存檔）
+GROQ_API_KEY=你的_Groq_API_Key
 # 選填：達到此訊息數時觸發自動壓縮（預設 16）
 MAX_MESSAGES_BEFORE_COMPRESS=16
 ```
@@ -74,6 +77,7 @@ on_message() 接收
         │
         ├─ 是 bot 自己？   → 忽略
         ├─ 不在白名單？    → 回應「未授權」
+        ├─ 語音訊息？      → 語音處理流程（見下方）
         ├─ 空訊息？        → 忽略
         ├─ 特殊指令？      → 對應處理
         │   (/help, /new, /clear, /context, /summarize, /summary,
@@ -95,6 +99,56 @@ chunk_message() 分塊處理（代碼塊感知）
         │
         ├─ ≤ 2000 字元 → 直接送出
         └─ > 2000 字元 → 分段送出（保持代碼塊完整）
+```
+
+## 語音訊息轉文字
+
+Discord 語音訊息會自動轉錄為文字，再交給 Claude 回應。使用 [Groq](https://console.groq.com/) 提供的 Whisper API，免費方案檔案上限 25 MB。
+
+### 轉錄設定
+
+| 參數 | 值 | 說明 |
+|------|-----|------|
+| 模型 | `whisper-large-v3` | OpenAI Whisper 大型模型，由 Groq 託管 |
+| 語言 | `zh` | 指定中文，提高辨識準確度 |
+| prompt | `以下是繁體中文的語音內容` | 引導模型輸出繁體中文而非簡體 |
+| 回應格式 | `verbose_json` | 包含時間戳等詳細資訊 |
+
+> **關於繁體中文輸出**：Whisper 模型預設可能輸出簡體中文，透過設定 `prompt` 參數為繁體中文提示語，可以引導模型優先輸出繁體中文。
+
+### 流程
+
+```
+收到語音訊息
+    │
+    ▼
+儲存 .ogg 到 voice_messages/
+    │
+    ▼
+有 GROQ_API_KEY？
+    │
+    ├─ 否 → 回覆「語音已儲存（未設定 Key）」
+    │
+    └─ 是 → Groq Whisper 轉錄
+              │
+              ├─ 失敗 → 通知使用者，語音檔保留
+              ├─ 結果為空 → 提示無法辨識
+              └─ 成功 → 顯示轉錄文字
+                        │
+                        ▼
+                  ask_claude() 回應
+```
+
+### 獨立使用轉錄工具
+
+`speech_to_text.py` 也可以作為獨立 CLI 工具使用：
+
+```bash
+# 轉錄既有音訊
+python speech_to_text.py transcribe voice_messages/xxx.ogg
+
+# 錄音再轉錄
+python speech_to_text.py record 10
 ```
 
 ## 上下文記憶
@@ -361,11 +415,13 @@ and cannot be used for other API requests."
 ```
 bot_discord.py              # 主程式
 claude_cli.py               # Claude CLI 指令組裝（含 permission mode）
+speech_to_text.py           # 語音轉文字模組（Groq Whisper API）
 cron_scheduler.py           # 排程核心
 cron_commands.py            # 排程命令處理
 conversation_history.json   # 對話歷史（自動產生）
 memory.json                 # 長期記憶（自動產生）
 cron_jobs.json              # 排程任務（自動產生）
+voice_messages/             # 語音訊息儲存目錄（自動產生）
 ```
 
 ## Donation
