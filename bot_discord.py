@@ -705,7 +705,8 @@ async def on_message(message: discord.Message):
             await message.channel.send("無法辨識語音內容，請重新錄製")
             return
 
-        await message.channel.send(f"**語音轉錄：** {transcribed_text}")
+        for chunk in chunk_message(f"**語音轉錄：** {transcribed_text}"):
+            await message.channel.send(chunk)
 
         # 送給 Claude 回應
         async with message.channel.typing():

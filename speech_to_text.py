@@ -45,7 +45,7 @@ def get_audio_duration(audio_path: str) -> str:
 
 
 def record_audio(output_path: str, duration: int = None):
-    """使用 ffmpeg 錄製 mp3 音訊（64kbps mono，語音辨識最佳）"""
+    """使用 ffmpeg 錄製 ogg 音訊（64kbps mono，語音辨識最佳）"""
     cmd = ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-ac", "1", "-b:a", "64k"]
 
     if duration:
@@ -55,7 +55,7 @@ def record_audio(output_path: str, duration: int = None):
 
     print(f"錄音中... {'按 Ctrl+C 停止' if not duration else f'將錄製 {duration} 秒'}")
     print(f"輸出檔案: {output_path}")
-    print(f"格式: MP3 64kbps mono\n")
+    print(f"格式: OGG 64kbps mono\n")
 
     try:
         subprocess.run(cmd, check=True)
@@ -102,13 +102,13 @@ def print_result(result):
 def main():
     if len(sys.argv) < 2:
         print("用法:")
-        print("  python groq_whisper_example.py transcribe <音訊檔路徑>")
-        print("  python groq_whisper_example.py record [秒數]")
+        print("  python speech_to_text.py transcribe <音訊檔路徑>")
+        print("  python speech_to_text.py record [秒數]")
         print()
         print("範例:")
-        print("  python groq_whisper_example.py transcribe recording.mp3")
-        print("  python groq_whisper_example.py record        # 按 Ctrl+C 停止")
-        print("  python groq_whisper_example.py record 10     # 錄 10 秒")
+        print("  python speech_to_text.py transcribe recording.ogg")
+        print("  python speech_to_text.py record        # 按 Ctrl+C 停止")
+        print("  python speech_to_text.py record 10     # 錄 10 秒")
         sys.exit(1)
 
     command = sys.argv[1]
