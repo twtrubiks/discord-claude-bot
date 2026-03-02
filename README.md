@@ -22,17 +22,20 @@ pip install -r requirements.txt
 
 ## 環境設定
 
-建立 `.env` 檔案：
+複製範例檔並填入你的設定：
 
+```bash
+cp .env.example .env
 ```
-DISCORD_BOT_TOKEN=你的_Discord_Bot_Token
-# 選填：用戶白名單，逗號分隔；留空代表不啟用白名單（所有人可用）
-ALLOWED_USER_IDS=用戶ID1,用戶ID2
-# 選填：Groq API Key（語音轉文字功能，未設定時語音訊息僅存檔）
-GROQ_API_KEY=你的_Groq_API_Key
-# 選填：達到此訊息數時觸發自動壓縮（預設 16）
-MAX_MESSAGES_BEFORE_COMPRESS=16
-```
+
+各變數說明：
+
+| 變數 | 必填 | 說明 |
+|------|:----:|------|
+| `DISCORD_BOT_TOKEN` | 是 | 從 [Discord Developer Portal](https://discord.com/developers/applications) 取得 |
+| `ALLOWED_USER_IDS` | 否 | 用戶白名單，逗號分隔；留空代表所有人可用 |
+| `GROQ_API_KEY` | 否 | 語音轉文字功能，從 [Groq Console](https://console.groq.com/) 取得，未設定時語音訊息僅存檔 |
+| `MAX_MESSAGES_BEFORE_COMPRESS` | 否 | 達到此訊息數時觸發自動壓縮（預設 16） |
 
 ## 使用方式
 
@@ -409,20 +412,6 @@ and cannot be used for other API requests."
 ### 結論
 
 這是一個**取捨**：為了使用訂閱額度，犧牲了一些功能性。對於個人使用的 Discord Bot，這個取捨是可接受的。如果需要更強大的功能（如 Tool Use、串流回覆），建議購買官方 API Key。
-
-## 專案結構
-
-```
-bot_discord.py              # 主程式
-claude_cli.py               # Claude CLI 指令組裝（含 permission mode）
-speech_to_text.py           # 語音轉文字模組（Groq Whisper API）
-cron_scheduler.py           # 排程核心
-cron_commands.py            # 排程命令處理
-conversation_history.json   # 對話歷史（自動產生）
-memory.json                 # 長期記憶（自動產生）
-cron_jobs.json              # 排程任務（自動產生）
-voice_messages/             # 語音訊息儲存目錄（自動產生）
-```
 
 ## Donation
 
