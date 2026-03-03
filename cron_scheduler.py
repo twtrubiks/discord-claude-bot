@@ -8,18 +8,18 @@
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Callable, Awaitable
-import uuid
+from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
 from apscheduler import AsyncScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +109,7 @@ class CronScheduler:
         self._scheduler: Optional[AsyncScheduler] = None
         self._jobs: dict[str, CronJob] = {}
         self._message_sender: Optional[Callable[[int, str], Awaitable[None]]] = None
-        self._claude_invoker: Optional[
-            Callable[[int, int, str], Awaitable[str]]
-        ] = None
+        self._claude_invoker: Optional[Callable[[int, int, str], Awaitable[str]]] = None
 
     def set_callbacks(
         self,
@@ -222,7 +220,9 @@ class CronScheduler:
                 id=job.id,
                 args=[job.id],
             )
-            logger.info(f"Registered job {job.id}: {job.description or job.message[:30]}")
+            logger.info(
+                f"Registered job {job.id}: {job.description or job.message[:30]}"
+            )
         except Exception as e:
             logger.error(f"Failed to register job {job.id}: {e}")
 
@@ -251,27 +251,29 @@ class CronScheduler:
             return
 
         logger.info(f"[CRON] Executing job {job_id}: {job.message[:50]}...")
-        logger.info(f"[CRON] channel_id={job.channel_id}, invoke_claude={job.invoke_claude}")
+        logger.info(
+            f"[CRON] channel_id={job.channel_id}, invoke_claude={job.invoke_claude}"
+        )
         logger.info(f"[CRON] _message_sender set: {self._message_sender is not None}")
 
         try:
             if job.invoke_claude:
                 # 觸發 Claude 回應
                 if self._claude_invoker:
-                    logger.info(f"[CRON] Invoking Claude...")
-                    await self._claude_invoker(
-                        job.channel_id, job.user_id, job.message
-                    )
+                    logger.info("[CRON] Invoking Claude...")
+                    await self._claude_invoker(job.channel_id, job.user_id, job.message)
                 else:
-                    logger.warning(f"[CRON] _claude_invoker is None!")
+                    logger.warning("[CRON] _claude_invoker is None!")
             else:
                 # 發送純訊息
                 if self._message_sender:
-                    logger.info(f"[CRON] Sending message to channel {job.channel_id}...")
+                    logger.info(
+                        f"[CRON] Sending message to channel {job.channel_id}..."
+                    )
                     await self._message_sender(job.channel_id, job.message)
-                    logger.info(f"[CRON] Message sent successfully")
+                    logger.info("[CRON] Message sent successfully")
                 else:
-                    logger.warning(f"[CRON] _message_sender is None!")
+                    logger.warning("[CRON] _message_sender is None!")
 
             # 一次性任務執行後自動刪除
             if job.schedule.kind == ScheduleKind.AT:

@@ -11,9 +11,10 @@
 免費方案檔案大小上限: 25 MB
 """
 
+import os
 import subprocess
 import sys
-import os
+
 from groq import Groq
 
 # ============================
@@ -30,9 +31,18 @@ def get_audio_duration(audio_path: str) -> str:
     """使用 ffprobe 取得音訊時間長度"""
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-            capture_output=True, text=True
+            [
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
         )
         seconds = float(result.stdout.strip())
         minutes = int(seconds // 60)
@@ -55,7 +65,7 @@ def record_audio(output_path: str, duration: int = None):
 
     print(f"錄音中... {'按 Ctrl+C 停止' if not duration else f'將錄製 {duration} 秒'}")
     print(f"輸出檔案: {output_path}")
-    print(f"格式: OGG 64kbps mono\n")
+    print("格式: OGG 64kbps mono\n")
 
     try:
         subprocess.run(cmd, check=True)

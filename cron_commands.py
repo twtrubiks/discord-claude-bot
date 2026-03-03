@@ -16,12 +16,12 @@ from typing import Optional
 
 from claude_cli import build_claude_command
 from cron_scheduler import (
-    cron_scheduler,
+    MIN_INTERVAL_SECONDS,
     CronJob,
     ScheduleConfig,
     ScheduleKind,
+    cron_scheduler,
     generate_job_id,
-    MIN_INTERVAL_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -225,12 +225,12 @@ def format_job_info(job: CronJob) -> str:
 **狀態**: {status}
 **類型**: {invoke_str}
 **排程**: {schedule_str}
-**描述**: {job.description or '無'}
+**描述**: {job.description or "無"}
 **訊息**:
 ```text
 {message_text}
 ```
-**建立時間**: {job.created_at.strftime('%Y-%m-%d %H:%M:%S')}"""
+**建立時間**: {job.created_at.strftime("%Y-%m-%d %H:%M:%S")}"""
 
 
 def format_job_list_item(job: CronJob) -> str:
@@ -323,9 +323,7 @@ async def handle_cron_command(
         return f"未知的子指令：`{subcommand}`。輸入 `/cron` 查看可用指令。"
 
 
-async def handle_remind_command(
-    args: list[str], channel_id: int, user_id: int
-) -> str:
+async def handle_remind_command(args: list[str], channel_id: int, user_id: int) -> str:
     """處理 /remind 指令
 
     格式：/remind <時間> <訊息>
@@ -376,9 +374,7 @@ async def handle_remind_command(
     )
 
 
-async def handle_every_command(
-    args: list[str], channel_id: int, user_id: int
-) -> str:
+async def handle_every_command(args: list[str], channel_id: int, user_id: int) -> str:
     """處理 /every 指令
 
     格式：/every <間隔> <訊息>
@@ -428,9 +424,7 @@ async def handle_every_command(
     )
 
 
-async def handle_daily_command(
-    args: list[str], channel_id: int, user_id: int
-) -> str:
+async def handle_daily_command(args: list[str], channel_id: int, user_id: int) -> str:
     """處理 /daily 指令
 
     格式：/daily <HH:MM> <提示>

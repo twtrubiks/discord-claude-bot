@@ -32,3 +32,6 @@ memory.json
 
 # Voice messages
 voice_messages/
+
+# Claude Code
+CLAUDE.md

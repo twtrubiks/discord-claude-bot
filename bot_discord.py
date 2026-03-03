@@ -16,14 +16,14 @@ import discord
 from dotenv import load_dotenv
 
 from claude_cli import build_claude_command
-from speech_to_text import transcribe
-from cron_scheduler import cron_scheduler
 from cron_commands import (
     handle_cron_command,
-    handle_remind_command,
-    handle_every_command,
     handle_daily_command,
+    handle_every_command,
+    handle_remind_command,
 )
+from cron_scheduler import cron_scheduler
+from speech_to_text import transcribe
 
 load_dotenv()
 
@@ -507,7 +507,9 @@ def build_context(user_id: int) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-async def ask_claude(user_id: int, message: str, max_retries: int = 3, timeout: int = 600) -> str:
+async def ask_claude(
+    user_id: int, message: str, max_retries: int = 3, timeout: int = 600
+) -> str:
     """調用 Claude CLI，包含對話歷史和重試機制
 
     使用 ThreadPoolExecutor 執行 subprocess，避免阻塞 asyncio 事件循環，
@@ -556,7 +558,9 @@ async def ask_claude(user_id: int, message: str, max_retries: int = 3, timeout: 
             # 檢查返回碼
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or "未知錯誤"
-                logger.error(f"Claude CLI error (code {result.returncode}): {error_msg}")
+                logger.error(
+                    f"Claude CLI error (code {result.returncode}): {error_msg}"
+                )
                 return f"Claude 執行失敗: {error_msg}"
 
             output = result.stdout.strip()
@@ -573,13 +577,15 @@ async def ask_claude(user_id: int, message: str, max_retries: int = 3, timeout: 
                 # 檢查是否需要壓縮（在執行緒池中執行，避免阻塞事件循環）
                 await loop.run_in_executor(executor, maybe_compress_history, user_id)
 
-            return output or f"Claude returned no output.\nstderr: {result.stderr.strip()}"
+            return (
+                output or f"Claude returned no output.\nstderr: {result.stderr.strip()}"
+            )
 
         except subprocess.TimeoutExpired:
             last_error = "timeout"
             if attempt < max_retries - 1:
                 # 指數退避 + 隨機抖動
-                delay = (2 ** attempt) + random.uniform(0, 1)
+                delay = (2**attempt) + random.uniform(0, 1)
                 logger.warning(
                     f"Claude timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
                 )
@@ -610,7 +616,9 @@ async def send_channel_message(channel_id: int, message: str):
             await channel.send(chunk)
 
 
-async def invoke_claude_for_channel(channel_id: int, _user_id: int, prompt: str, timeout: int = 600) -> str:
+async def invoke_claude_for_channel(
+    channel_id: int, _user_id: int, prompt: str, timeout: int = 600
+) -> str:
     """為頻道觸發 Claude 回應（不帶對話歷史）
 
     使用 ThreadPoolExecutor 執行 subprocess，避免阻塞 asyncio 事件循環。
@@ -654,8 +662,7 @@ async def on_ready():
 
     # 設定排程器回調並啟動
     cron_scheduler.set_callbacks(
-        message_sender=send_channel_message,
-        claude_invoker=invoke_claude_for_channel
+        message_sender=send_channel_message, claude_invoker=invoke_claude_for_channel
     )
     await cron_scheduler.start()
     logger.info("Cron scheduler started")
@@ -692,9 +699,7 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"語音已儲存{duration}，轉錄中...")
         try:
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                executor, transcribe, str(filename)
-            )
+            result = await loop.run_in_executor(executor, transcribe, str(filename))
             transcribed_text = result.text.strip()
         except Exception as e:
             logger.error(f"Voice transcription failed: {e}")
@@ -784,9 +789,7 @@ async def on_message(message: discord.Message):
             save_history()
 
             if fact_count > 0:
-                await message.channel.send(
-                    f"✓ 已提取 {fact_count} 條記憶並開始新對話"
-                )
+                await message.channel.send(f"✓ 已提取 {fact_count} 條記憶並開始新對話")
             else:
                 await message.channel.send("✓ 新對話已開始（長期記憶已保留）")
         else:
@@ -914,28 +917,36 @@ async def on_message(message: discord.Message):
     # Cron 排程指令
     if user_message.lower().startswith("/cron"):
         args = user_message.split()[1:]
-        response = await handle_cron_command("cron", args, message.channel.id, message.author.id)
+        response = await handle_cron_command(
+            "cron", args, message.channel.id, message.author.id
+        )
         for chunk in chunk_message(response):
             await message.channel.send(chunk)
         return
 
     if user_message.lower().startswith("/remind"):
         args = user_message.split()[1:]
-        response = await handle_remind_command(args, message.channel.id, message.author.id)
+        response = await handle_remind_command(
+            args, message.channel.id, message.author.id
+        )
         for chunk in chunk_message(response):
             await message.channel.send(chunk)
         return
 
     if user_message.lower().startswith("/every"):
         args = user_message.split()[1:]
-        response = await handle_every_command(args, message.channel.id, message.author.id)
+        response = await handle_every_command(
+            args, message.channel.id, message.author.id
+        )
         for chunk in chunk_message(response):
             await message.channel.send(chunk)
         return
 
     if user_message.lower().startswith("/daily"):
         args = user_message.split()[1:]
-        response = await handle_daily_command(args, message.channel.id, message.author.id)
+        response = await handle_daily_command(
+            args, message.channel.id, message.author.id
+        )
         for chunk in chunk_message(response):
             await message.channel.send(chunk)
         return
