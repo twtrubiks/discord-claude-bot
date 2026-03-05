@@ -630,9 +630,47 @@ async def ask_claude_with_lock(
             await message.channel.send(chunk)
 
 
+HELP_TEXT = """**對話指令：**
+• `/help` 或 `說明` - 顯示此說明
+• `/new` 或 `新對話` - 保存記憶並開始新對話
+• `/clear` 或 `清除歷史` - 清除對話歷史和摘要（保留長期記憶）
+• `/context` 或 `上下文` - 查看上下文狀態
+• `/summarize` - 手動生成摘要
+• `/summary` - 查看當前摘要
+
+**記憶指令：**
+• `/memory` 或 `記憶` - 查看長期記憶
+• `/forget` 或 `忘記` - 清除所有長期記憶
+• `/forget <編號>` - 刪除特定一條記憶
+
+**排程指令：**
+• `/cron list` - 列出所有排程任務
+• `/cron info <id>` - 查看任務詳情（含完整提示詞）
+• `/cron remove <id>` - 刪除任務
+• `/cron toggle <id>` - 啟用/停用任務
+• `/cron test <id>` - 立即執行測試
+• `/remind <時間> <訊息>` - 一次性提醒（如 `/remind 30m 開會`）
+• `/every <間隔> <訊息>` - 定期訊息（如 `/every 1h 喝水`）
+• `/daily <HH:MM> <提示>` - 每日觸發 Claude（如 `/daily 09:00 今日新聞`）
+
+**使用方式：**
+直接輸入訊息即可與 Claude 對話，Bot 會記住對話歷史。
+切換話題時建議使用 `/new`，會自動保存重要資訊到長期記憶。"""
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+tree = discord.app_commands.CommandTree(client)
+
+
+@tree.command(name="help", description="顯示所有可用指令")
+async def help_slash_command(interaction: discord.Interaction):
+    if not is_authorized(interaction.user.id):
+        await interaction.response.send_message(
+            "You are not authorized to use this bot.", ephemeral=True
+        )
+        return
+    await interaction.response.send_message(HELP_TEXT)
 
 
 async def send_channel_message(channel_id: int, message: str):
@@ -686,6 +724,25 @@ async def invoke_claude_for_channel(
 @client.event
 async def on_ready():
     logger.info(f"Bot logged in as {client.user}")
+
+    # 設定 bot 狀態，提示使用者輸入 /help 查看指令
+    await client.change_presence(activity=discord.Game(name="打 /help 查看指令"))
+
+    # 同步 slash commands 到 Discord（guild sync 即時生效）
+    guild_id = os.environ.get("DISCORD_GUILD_ID")
+    if guild_id:
+        guild = discord.Object(id=int(guild_id))
+        # 先複製指令到 guild（此時 global 還有指令）
+        tree.copy_global_to(guild=guild)
+        # 清除全域指令並同步（移除之前誤註冊的全域 commands）
+        tree.clear_commands(guild=None)
+        await tree.sync()
+        # 同步 guild 指令
+        await tree.sync(guild=guild)
+        logger.info(f"Slash commands synced to guild {guild_id}")
+    else:
+        await tree.sync()
+        logger.info("Slash commands synced globally (may take up to 1 hour)")
 
     # 設定排程器回調並啟動
     cron_scheduler.set_callbacks(
@@ -752,33 +809,7 @@ async def on_message(message: discord.Message):
 
     # 特殊命令：顯示說明
     if user_message.lower() in ["/help", "說明", "幫助"]:
-        help_text = """**對話指令：**
-• `/help` 或 `說明` - 顯示此說明
-• `/new` 或 `新對話` - 保存記憶並開始新對話
-• `/clear` 或 `清除歷史` - 清除對話歷史和摘要（保留長期記憶）
-• `/context` 或 `上下文` - 查看上下文狀態
-• `/summarize` - 手動生成摘要
-• `/summary` - 查看當前摘要
-
-**記憶指令：**
-• `/memory` 或 `記憶` - 查看長期記憶
-• `/forget` 或 `忘記` - 清除所有長期記憶
-• `/forget <編號>` - 刪除特定一條記憶
-
-**排程指令：**
-• `/cron list` - 列出所有排程任務
-• `/cron info <id>` - 查看任務詳情（含完整提示詞）
-• `/cron remove <id>` - 刪除任務
-• `/cron toggle <id>` - 啟用/停用任務
-• `/cron test <id>` - 立即執行測試
-• `/remind <時間> <訊息>` - 一次性提醒（如 `/remind 30m 開會`）
-• `/every <間隔> <訊息>` - 定期訊息（如 `/every 1h 喝水`）
-• `/daily <HH:MM> <提示>` - 每日觸發 Claude（如 `/daily 09:00 今日新聞`）
-
-**使用方式：**
-直接輸入訊息即可與 Claude 對話，Bot 會記住對話歷史。
-切換話題時建議使用 `/new`，會自動保存重要資訊到長期記憶。"""
-        await message.channel.send(help_text)
+        await message.channel.send(HELP_TEXT)
         return
 
     # 特殊命令：清除歷史和摘要（保留長期記憶）

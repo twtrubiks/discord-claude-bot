@@ -35,6 +35,7 @@ cp .env.example .env
 | `DISCORD_BOT_TOKEN` | 是 | 從 [Discord Developer Portal](https://discord.com/developers/applications) 取得 |
 | `ALLOWED_USER_IDS` | 否 | 用戶白名單，逗號分隔；留空代表所有人可用 |
 | `GROQ_API_KEY` | 否 | 語音轉文字功能，從 [Groq Console](https://console.groq.com/) 取得，未設定時語音訊息僅存檔 |
+| `DISCORD_GUILD_ID` | 否 | 伺服器 ID，設定後 `/help` slash command 即時生效（不設則需等最多 1 小時） |
 | `MAX_MESSAGES_BEFORE_COMPRESS` | 否 | 達到此訊息數時觸發自動壓縮（預設 16） |
 
 ## 使用方式
