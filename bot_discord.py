@@ -70,6 +70,9 @@ FENCE_PATTERN = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$", re.MULTILINE)
 # 執行緒池：用於執行阻塞的 subprocess 呼叫，避免阻塞 asyncio 事件循環
 executor = ThreadPoolExecutor(max_workers=4)
 
+# Per-user lock：確保同一使用者的 ask_claude() 不會同時執行
+user_locks: dict[int, asyncio.Lock] = {}
+
 
 def chunk_message(text: str, max_chars: int = DISCORD_CHAR_LIMIT) -> list[str]:
     """智能分塊，保持代碼塊完整
@@ -603,6 +606,30 @@ async def ask_claude(
     return f"Claude 執行失敗: {last_error or '未知錯誤'}"
 
 
+async def ask_claude_with_lock(
+    user_id: int, prompt: str, message: discord.Message
+) -> None:
+    """取得 per-user lock 後呼叫 ask_claude()，排隊時顯示 ⏳ reaction。"""
+    lock = user_locks.setdefault(user_id, asyncio.Lock())
+    queued = lock.locked()
+    if queued:
+        try:
+            await message.add_reaction("\u23f3")
+        except discord.HTTPException:
+            pass
+
+    async with lock:
+        if queued:
+            try:
+                await message.remove_reaction("\u23f3", client.user)
+            except discord.HTTPException:
+                pass
+        async with message.channel.typing():
+            response = await ask_claude(user_id, prompt)
+        for chunk in chunk_message(response):
+            await message.channel.send(chunk)
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
@@ -713,12 +740,8 @@ async def on_message(message: discord.Message):
         for chunk in chunk_message(f"**語音轉錄：** {transcribed_text}"):
             await message.channel.send(chunk)
 
-        # 送給 Claude 回應
-        async with message.channel.typing():
-            response = await ask_claude(message.author.id, transcribed_text)
-
-        for chunk in chunk_message(response):
-            await message.channel.send(chunk)
+        # 送給 Claude 回應（per-user lock 確保不會同時執行）
+        await ask_claude_with_lock(message.author.id, transcribed_text, message)
         return
 
     user_message = message.content.strip()
@@ -953,15 +976,8 @@ async def on_message(message: discord.Message):
 
     logger.info(f"User {message.author.id}: {user_message[:50]}...")
 
-    # show typing indicator
-    async with message.channel.typing():
-        response = await ask_claude(message.author.id, user_message)
-
-    # Discord message limit is 2000 characters
-    # 使用智能分塊，保持代碼塊完整
-    chunks = chunk_message(response)
-    for chunk in chunks:
-        await message.channel.send(chunk)
+    # Per-user lock：同一使用者的請求排隊執行，避免 race condition
+    await ask_claude_with_lock(message.author.id, user_message, message)
 
 
 def main():
