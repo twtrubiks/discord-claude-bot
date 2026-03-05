@@ -54,7 +54,7 @@ def get_audio_duration(audio_path: str) -> str:
         return "未知"
 
 
-def record_audio(output_path: str, duration: int = None):
+def record_audio(output_path: str, duration: int | None = None):
     """使用 ffmpeg 錄製 ogg 音訊（64kbps mono，語音辨識最佳）"""
     cmd = ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-ac", "1", "-b:a", "64k"]
 

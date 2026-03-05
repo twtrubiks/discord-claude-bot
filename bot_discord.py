@@ -182,7 +182,7 @@ def get_conversation_state(user_id: int) -> ConversationState:
 
 
 # AI 摘要設定
-MESSAGES_TO_SUMMARIZE = 10  # 壓縮最舊的 5 輪
+MESSAGES_TO_SUMMARIZE = 10  # 壓縮最舊的 10 則訊息（約 5 輪對話）
 MAX_SUMMARY_CHARS = 2000  # 摘要最大字符數
 
 SUMMARY_PROMPT = """請將以下對話處理成兩個部分：
@@ -251,8 +251,7 @@ def merge_memory_facts(user_id: int, new_facts: list[str]):
         fact = fact.strip()
         if not fact:
             continue
-        is_duplicate = fact in existing
-        if not is_duplicate:
+        if fact not in existing:
             existing.append(fact)
 
     # 保留最新的 MAX_MEMORY_FACTS 個事實
@@ -530,16 +529,13 @@ async def ask_claude(
     # 組合上下文
     context = build_context(user_id)
 
-    if context:
-        full_prompt = f"""先前的對話紀錄：
+    full_prompt = f"""先前的對話紀錄：
 {context}
 
 使用者目前的訊息：
 {message}
 
 請根據以上對話紀錄，回應使用者目前的訊息。"""
-    else:
-        full_prompt = message
 
     def run_claude_sync() -> subprocess.CompletedProcess:
         """同步執行 Claude CLI（在執行緒池中執行）"""
