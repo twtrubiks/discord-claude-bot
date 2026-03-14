@@ -237,9 +237,11 @@ def format_job_list_item(job: CronJob) -> str:
     """格式化任務列表項目"""
     status = "✓" if job.enabled else "✗"
     schedule_str = format_schedule(job.schedule)
-    msg_preview = job.message[:30] + "..." if len(job.message) > 30 else job.message
+    display = job.description or job.message[:50] + (
+        "..." if len(job.message) > 50 else ""
+    )
 
-    return f"`{job.id}` [{status}] {schedule_str} - {msg_preview}"
+    return f"`{job.id}` [{status}] {schedule_str} - {display}"
 
 
 async def handle_cron_command(
