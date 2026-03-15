@@ -6,6 +6,10 @@
 
 * [Youtube Tutorial - OpenClaw 啟發 - Discord + Claude AI 整合實戰](https://youtu.be/2UwnqbQsRyY)
 
+* [Youtube Tutorial - 一支影片看懂 Moltbot：架構、爭議、自己做一個](https://youtu.be/UGR7Z4yKGhE)
+
+* [Youtube Tutorial - 免費又快！Groq Whisper 語音轉文字整合 Discord Claude Bot 實戰](https://youtu.be/P2Oovw_YZkY)
+
 ## 功能
 
 - 與 Claude AI 對話（使用 Claude Code 訂閱額度，無需另購 API Key）
@@ -413,6 +417,10 @@ and cannot be used for other API requests."
 ### 結論
 
 這是一個**取捨**：為了使用訂閱額度，犧牲了一些功能性。對於個人使用的 Discord Bot，這個取捨是可接受的。如果需要更強大的功能（如 Tool Use、串流回覆），建議購買官方 API Key。
+
+## Claude Code Skills
+
+支援 [Claude Code Skills](https://docs.anthropic.com/en/docs/claude-code/skills)，可在 `.claude/skills/` 目錄下新增自訂 skill 來擴充 Claude 的能力.
 
 ## Donation
 
