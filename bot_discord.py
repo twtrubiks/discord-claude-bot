@@ -5,6 +5,7 @@ import os
 import random
 import re
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -15,7 +16,7 @@ from zoneinfo import ZoneInfo
 import discord
 from dotenv import load_dotenv
 
-from claude_cli import build_claude_command
+from claude_cli import build_claude_command, build_claude_stream_command
 from cron_commands import (
     handle_cron_command,
     handle_daily_command,
@@ -66,6 +67,11 @@ def get_current_timestamp(timezone: str = "Asia/Taipei") -> str:
 # Discord 訊息分塊設定
 DISCORD_CHAR_LIMIT = 2000
 FENCE_PATTERN = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$", re.MULTILINE)
+
+# Streaming 設定
+STREAM_ENABLED = os.environ.get("STREAM_ENABLED", "true").lower() == "true"
+STREAM_EDIT_INTERVAL = 1.0  # Discord message edit 間隔（秒）
+STREAM_CURSOR = " \u2596"  # streaming 進行中的視覺指示（▖）
 
 # 執行緒池：用於執行阻塞的 subprocess 呼叫，避免阻塞 asyncio 事件循環
 executor = ThreadPoolExecutor(max_workers=4)
@@ -509,6 +515,30 @@ def build_context(user_id: int) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+async def _save_conversation_turn(
+    user_id: int, user_msg: str, assistant_msg: str
+) -> None:
+    """儲存一輪對話並觸發歷史壓縮檢查。"""
+    state = get_conversation_state(user_id)
+    state.messages.append(Message("user", user_msg, datetime.now()))
+    state.messages.append(Message("assistant", assistant_msg, datetime.now()))
+    save_history()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, maybe_compress_history, user_id)
+
+
+def _build_prompt(user_id: int, message_text: str) -> str:
+    """組合上下文與使用者訊息為完整 prompt。"""
+    context = build_context(user_id)
+    return f"""先前的對話紀錄：
+{context}
+
+使用者目前的訊息：
+{message_text}
+
+請根據以上對話紀錄，回應使用者目前的訊息。"""
+
+
 async def ask_claude(
     user_id: int, message: str, max_retries: int = 3, timeout: int = 600
 ) -> str:
@@ -526,16 +556,7 @@ async def ask_claude(
     Returns:
         Claude 的回應或錯誤訊息
     """
-    # 組合上下文
-    context = build_context(user_id)
-
-    full_prompt = f"""先前的對話紀錄：
-{context}
-
-使用者目前的訊息：
-{message}
-
-請根據以上對話紀錄，回應使用者目前的訊息。"""
+    full_prompt = _build_prompt(user_id, message)
 
     def run_claude_sync() -> subprocess.CompletedProcess:
         """同步執行 Claude CLI（在執行緒池中執行）"""
@@ -565,16 +586,7 @@ async def ask_claude(
             output = result.stdout.strip()
 
             if output:
-                # 儲存對話歷史
-                state = get_conversation_state(user_id)
-                state.messages.append(Message("user", message, datetime.now()))
-                state.messages.append(Message("assistant", output, datetime.now()))
-
-                # 儲存到檔案
-                save_history()
-
-                # 檢查是否需要壓縮（在執行緒池中執行，避免阻塞事件循環）
-                await loop.run_in_executor(executor, maybe_compress_history, user_id)
+                await _save_conversation_turn(user_id, message, output)
 
             return (
                 output or f"Claude returned no output.\nstderr: {result.stderr.strip()}"
@@ -602,10 +614,182 @@ async def ask_claude(
     return f"Claude 執行失敗: {last_error or '未知錯誤'}"
 
 
+def parse_stream_delta(line: str) -> str | None:
+    """從一行 NDJSON 中提取 text_delta，非 delta 事件回傳 None。"""
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if data.get("type") != "stream_event":
+        return None
+    event = data.get("event", {})
+    if event.get("type") != "content_block_delta":
+        return None
+    delta = event.get("delta", {})
+    if delta.get("type") == "text_delta":
+        return delta.get("text")
+    return None
+
+
+async def _run_stream_loop(
+    cmd: list[str],
+    channel: discord.abc.Messageable,
+    timeout: int,
+) -> str | None:
+    """執行 Claude CLI streaming，即時編輯 Discord 訊息。
+
+    回傳完整回應文字，空回應回傳 None。
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+
+    if proc.stdout is None:
+        raise RuntimeError("Failed to capture Claude CLI stdout")
+
+    bot_msg = await channel.send(STREAM_CURSOR)
+    full_response = ""
+    last_edit_time = 0.0
+    current_msg = bot_msg
+    sent_messages: list[discord.Message] = [bot_msg]
+    current_msg_start = 0
+
+    try:
+        while True:
+            try:
+                raw_line = await asyncio.wait_for(
+                    proc.stdout.readline(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise
+
+            if not raw_line:
+                break
+
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+
+            delta = parse_stream_delta(line)
+            if delta is None:
+                continue
+
+            full_response += delta
+            now = time.monotonic()
+
+            current_segment = full_response[current_msg_start:]
+            if len(current_segment) > DISCORD_CHAR_LIMIT - 100:
+                split_at = DISCORD_CHAR_LIMIT - 50
+                final_text = current_segment[:split_at]
+                try:
+                    await current_msg.edit(content=final_text)
+                except discord.HTTPException:
+                    logger.debug("Failed to edit message during split")
+                current_msg_start += split_at
+                remaining = full_response[current_msg_start:]
+                current_msg = await channel.send(remaining + STREAM_CURSOR)
+                sent_messages.append(current_msg)
+                last_edit_time = now
+                continue
+
+            if now - last_edit_time >= STREAM_EDIT_INTERVAL:
+                display = current_segment + STREAM_CURSOR
+                if len(display) <= DISCORD_CHAR_LIMIT:
+                    try:
+                        await current_msg.edit(content=display)
+                    except discord.HTTPException:
+                        logger.debug("Failed to edit message during streaming")
+                    last_edit_time = now
+
+        await proc.wait()
+
+        if not full_response:
+            try:
+                await bot_msg.edit(content="Claude 無回應")
+            except discord.HTTPException:
+                logger.debug("Failed to edit empty response message")
+            return None
+
+        if len(sent_messages) == 1 and len(full_response) <= DISCORD_CHAR_LIMIT:
+            try:
+                await current_msg.edit(content=full_response)
+            except discord.HTTPException:
+                logger.debug("Failed to finalize message edit")
+        else:
+            await asyncio.gather(
+                *(msg.delete() for msg in sent_messages), return_exceptions=True
+            )
+            for chunk in chunk_message(full_response):
+                await channel.send(chunk)
+
+        return full_response
+
+    except Exception:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        await asyncio.gather(
+            *(msg.delete() for msg in sent_messages), return_exceptions=True
+        )
+        raise
+
+
+async def ask_claude_stream(
+    user_id: int,
+    message_text: str,
+    discord_msg: discord.Message,
+    max_retries: int = 3,
+    timeout: int = 600,
+) -> None:
+    """以 streaming 方式調用 Claude CLI，即時更新 Discord 訊息。"""
+    full_prompt = _build_prompt(user_id, message_text)
+    cmd = build_claude_stream_command(full_prompt)
+    last_error: str | None = None
+
+    for attempt in range(max_retries):
+        try:
+            full_response = await _run_stream_loop(cmd, discord_msg.channel, timeout)
+
+            if full_response:
+                await _save_conversation_turn(user_id, message_text, full_response)
+            return
+
+        except asyncio.TimeoutError:
+            last_error = "timeout"
+            if attempt < max_retries - 1:
+                delay = (2**attempt) + random.uniform(0, 1)
+                logger.warning(
+                    f"Claude stream timeout, retrying in {delay:.1f}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"Claude stream timeout after {max_retries} attempts")
+                await discord_msg.channel.send(
+                    f"Claude 多次超時（{max_retries} 次），請稍後再試"
+                )
+                return
+
+        except FileNotFoundError:
+            await discord_msg.channel.send(
+                "claude CLI not found, please make sure Claude Code is installed."
+            )
+            return
+        except Exception as e:
+            logger.error(f"Claude stream error: {e}")
+            await discord_msg.channel.send(f"Error: {e}")
+            return
+
+    await discord_msg.channel.send(f"Claude 執行失敗: {last_error or '未知錯誤'}")
+
+
 async def ask_claude_with_lock(
     user_id: int, prompt: str, message: discord.Message
 ) -> None:
-    """取得 per-user lock 後呼叫 ask_claude()，排隊時顯示 ⏳ reaction。"""
+    """取得 per-user lock 後呼叫 ask_claude_stream()，排隊時顯示 ⏳ reaction。"""
     lock = user_locks.setdefault(user_id, asyncio.Lock())
     queued = lock.locked()
     if queued:
@@ -620,10 +804,13 @@ async def ask_claude_with_lock(
                 await message.remove_reaction("\u23f3", client.user)
             except discord.HTTPException:
                 pass
-        async with message.channel.typing():
-            response = await ask_claude(user_id, prompt)
-        for chunk in chunk_message(response):
-            await message.channel.send(chunk)
+        if STREAM_ENABLED:
+            await ask_claude_stream(user_id, prompt, message)
+        else:
+            async with message.channel.typing():
+                response = await ask_claude(user_id, prompt)
+            for chunk in chunk_message(response):
+                await message.channel.send(chunk)
 
 
 HELP_TEXT = """**對話指令：**

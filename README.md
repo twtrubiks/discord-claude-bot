@@ -13,6 +13,7 @@
 ## 功能
 
 - 與 Claude AI 對話（使用 Claude Code 訂閱額度，無需另購 API Key）
+- 即時串流回覆（token-level streaming，逐步顯示回應）
 - 對話歷史管理與自動摘要
 - 長期記憶（跨對話記住用戶偏好與重要資訊）
 - 排程任務（一次性提醒、定期觸發、每日排程）
@@ -41,6 +42,7 @@ cp .env.example .env
 | `GROQ_API_KEY` | 否 | 語音轉文字功能，從 [Groq Console](https://console.groq.com/) 取得，未設定時語音訊息僅存檔 |
 | `DISCORD_GUILD_ID` | 否 | 伺服器 ID，設定後 `/help` slash command 即時生效（不設則需等最多 1 小時） |
 | `MAX_MESSAGES_BEFORE_COMPRESS` | 否 | 達到此訊息數時觸發自動壓縮（預設 16） |
+| `STREAM_ENABLED` | 否 | 串流輸出開關（預設 `true`，設為 `false` 改回等待完整回應） |
 
 ## 使用方式
 
@@ -92,21 +94,32 @@ on_message() 接收
         │    /memory, /forget, /cron, /remind, /every, /daily...)
         │
         ▼
-ask_claude(user_id, message)
+ask_claude_with_lock(user_id, message)
         │
         ├─ 組合上下文（長期記憶 + 摘要 + 歷史）
         │
         ▼
-subprocess.run(["claude", "-p", prompt, "--permission-mode", "bypassPermissions"])
-        │  （含重試機制：最多 3 次）
-        ▼
-取得回應 + 儲存對話歷史
+STREAM_ENABLED?
         │
-        ▼
-chunk_message() 分塊處理（代碼塊感知）
+        ├─ true（預設）→ ask_claude_stream()
+        │     │
+        │     ▼
+        │   asyncio.create_subprocess_exec(["claude", "-p", ..., "--output-format", "stream-json", ...])
+        │     │  逐 token 讀取 NDJSON，每秒編輯 Discord 訊息
+        │     │  （含重試機制：最多 3 次）
+        │     ▼
+        │   串流結束 → 儲存對話歷史
         │
-        ├─ ≤ 2000 字元 → 直接送出
-        └─ > 2000 字元 → 分段送出（保持代碼塊完整）
+        └─ false → ask_claude()
+              │
+              ▼
+            subprocess.run(["claude", "-p", prompt, ...])
+              │  等待完整回應（含重試機制：最多 3 次）
+              ▼
+            取得回應 + 儲存對話歷史
+              │
+              ▼
+            chunk_message() 分塊處理（代碼塊感知）
 ```
 
 ## 語音訊息轉文字
@@ -343,21 +356,57 @@ User: 幫我寫一個函數
 ```
 on_message (async, 主執行緒/事件循環)
     │
-    └── ask_claude (async)
+    └── ask_claude_with_lock (async)
             │
-            ├── run_in_executor(run_claude_sync)        ← 執行緒池
+            ├─ STREAM_ENABLED=true（預設）
+            │   └── ask_claude_stream (async)
+            │           │
+            │           ├── asyncio.create_subprocess_exec    ← 原生 async subprocess
+            │           │       逐行讀取 NDJSON，每秒編輯 Discord 訊息
+            │           │
+            │           ├── _save_conversation_turn()         ← 主執行緒（毫秒級）
+            │           │
+            │           └── run_in_executor(maybe_compress_history) ← 執行緒池
             │
-            ├── save_history()                          ← 主執行緒（毫秒級）
-            │
-            └── run_in_executor(maybe_compress_history) ← 執行緒池
-                    │
-                    ├── generate_summary()  ← 同步，subprocess（同時萃取長期記憶條目）
-                    ├── compress_summary()  ← 同步，subprocess
-                    ├── merge_memory_facts() + save_memory() ← 同步，檔案 I/O
-                    └── save_history()      ← 同步，檔案 I/O
+            └─ STREAM_ENABLED=false
+                └── ask_claude (async)
+                        │
+                        ├── run_in_executor(run_claude_sync)  ← 執行緒池
+                        │
+                        ├── _save_conversation_turn()         ← 主執行緒（毫秒級）
+                        │
+                        └── run_in_executor(maybe_compress_history) ← 執行緒池
+
+背景壓縮任務（兩種模式共用）:
+    maybe_compress_history()
+        ├── generate_summary()  ← 同步，subprocess（同時萃取長期記憶條目）
+        ├── compress_summary()  ← 同步，subprocess
+        ├── merge_memory_facts() + save_memory() ← 同步，檔案 I/O
+        └── save_history()      ← 同步，檔案 I/O
 ```
 
-> **註**：`ask_claude` 中的 `save_history()` 在主執行緒執行，但檔案 I/O 通常只需 1-10 毫秒，遠低於 Discord heartbeat 的容忍範圍（數秒），因此不影響 bot 穩定性。
+> **註**：`_save_conversation_turn()` 中的 `save_history()` 在主執行緒執行，但檔案 I/O 通常只需 1-10 毫秒，遠低於 Discord heartbeat 的容忍範圍（數秒），因此不影響 bot 穩定性。
+
+## 串流輸出
+
+預設啟用 token-level streaming，透過 `claude -p` 搭配 `--output-format stream-json --verbose --include-partial-messages` 實現。
+
+### 運作方式
+
+1. 使用者發送訊息後，Bot 立即發送一則 placeholder 訊息
+2. Claude CLI 以 NDJSON 格式逐 token 輸出，Bot 每秒編輯一次 Discord 訊息
+3. 回應超過 2000 字元時，自動切換到新訊息繼續串流
+4. 串流結束後，使用 `chunk_message()` 確保代碼塊格式正確
+
+### 關閉串流
+
+在 `.env` 中設定：
+
+```
+STREAM_ENABLED=false
+```
+
+關閉後會退回原本的行為：等待 Claude 完整回應後一次送出。
 
 ## Claude API 呼叫方式
 
@@ -396,7 +445,6 @@ and cannot be used for other API requests."
 | 限制 | 說明 |
 |------|------|
 | **速度較慢** | 每次呼叫都要啟動新的 CLI 進程 |
-| **無法即時串流** | 難以實現逐字輸出的串流效果 |
 | **參數控制受限** | 無法精細調整 temperature、top_p 等參數 |
 | **併發能力差** | 同時處理多個請求較困難 |
 | **錯誤處理困難** | 難以捕捉和處理結構化的 API 錯誤 |
@@ -406,7 +454,7 @@ and cannot be used for other API requests."
 
 | 功能 | `claude -p` | HTTP API |
 |------|:-----------:|:--------:|
-| 即時串流回覆 | ❌ | ✅ |
+| 即時串流回覆 | ✅（透過 `--include-partial-messages`） | ✅ |
 | 多用戶併發 | ⚠️ 受限 | ✅ |
 | 結構化回應 | ❌ | ✅ |
 | Claude Code Skill / MCP | ✅（搭配 `bypassPermissions`） | ❌ |
@@ -416,7 +464,7 @@ and cannot be used for other API requests."
 
 ### 結論
 
-這是一個**取捨**：為了使用訂閱額度，犧牲了一些功能性。對於個人使用的 Discord Bot，這個取捨是可接受的。如果需要更強大的功能（如 Tool Use、串流回覆），建議購買官方 API Key。
+這是一個**取捨**：為了使用訂閱額度，犧牲了一些功能性。對於個人使用的 Discord Bot，這個取捨是可接受的。透過 `--include-partial-messages` 已實現即時串流回覆，大幅改善使用體驗。如果需要更強大的功能（如 Tool Use），建議購買官方 API Key。
 
 ## Claude Code Skills
 

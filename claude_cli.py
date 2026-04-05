@@ -12,3 +12,13 @@ def build_claude_command(prompt: str) -> list[str]:
         "--permission-mode",
         CLAUDE_PERMISSION_MODE,
     ]
+
+
+def build_claude_stream_command(prompt: str) -> list[str]:
+    """Build a Claude CLI command with token-level streaming (NDJSON output)."""
+    return build_claude_command(prompt) + [
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+    ]
