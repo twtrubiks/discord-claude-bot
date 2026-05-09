@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -78,6 +79,23 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 # Per-user lock：確保同一使用者的 ask_claude() 不會同時執行
 user_locks: dict[int, asyncio.Lock] = {}
+
+
+@contextlib.asynccontextmanager
+async def safe_typing(channel):
+    """像 channel.typing() 但若 typing endpoint 被限流則略過，不影響主流程。"""
+    typing_cm = channel.typing()
+    entered = False
+    try:
+        await typing_cm.__aenter__()
+        entered = True
+    except discord.HTTPException as e:
+        logger.warning(f"略過 typing indicator: {e}")
+    try:
+        yield
+    finally:
+        if entered:
+            await typing_cm.__aexit__(None, None, None)
 
 
 def chunk_message(text: str, max_chars: int = DISCORD_CHAR_LIMIT) -> list[str]:
@@ -807,7 +825,7 @@ async def ask_claude_with_lock(
         if STREAM_ENABLED:
             await ask_claude_stream(user_id, prompt, message)
         else:
-            async with message.channel.typing():
+            async with safe_typing(message.channel):
                 response = await ask_claude(user_id, prompt)
             for chunk in chunk_message(response):
                 await message.channel.send(chunk)
@@ -884,7 +902,7 @@ async def invoke_claude_for_channel(
             timeout=timeout,
         )
 
-    async with channel.typing():
+    async with safe_typing(channel):
         # 使用執行緒池執行阻塞呼叫，不會阻塞 asyncio 事件循環
         try:
             loop = asyncio.get_running_loop()
@@ -1009,7 +1027,7 @@ async def on_message(message: discord.Message):
         # 至少 2 輪對話才值得提取
         if len(state.messages) >= 4:
             await message.channel.send("正在保存重要資訊到長期記憶...")
-            async with message.channel.typing():
+            async with safe_typing(message.channel):
                 loop = asyncio.get_running_loop()
 
                 def extract_and_clear():
@@ -1109,7 +1127,7 @@ async def on_message(message: discord.Message):
             return
 
         await message.channel.send("正在生成摘要...")
-        async with message.channel.typing():
+        async with safe_typing(message.channel):
             loop = asyncio.get_running_loop()
             new_summary, new_facts = await loop.run_in_executor(
                 executor, generate_summary, state.messages
