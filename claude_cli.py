@@ -1,6 +1,7 @@
 """Claude CLI command helpers."""
 
 CLAUDE_PERMISSION_MODE = "bypassPermissions"
+CLAUDE_DISALLOWED_TOOLS = "AskUserQuestion,ExitPlanMode,EnterPlanMode"
 
 
 def build_claude_command(prompt: str) -> list[str]:
@@ -11,6 +12,8 @@ def build_claude_command(prompt: str) -> list[str]:
         prompt,
         "--permission-mode",
         CLAUDE_PERMISSION_MODE,
+        "--disallowedTools",
+        CLAUDE_DISALLOWED_TOOLS,
     ]
 
 
