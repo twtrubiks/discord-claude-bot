@@ -178,7 +178,7 @@ async def generate_schedule_description_with_ai(
 
     def run_claude_sync() -> subprocess.CompletedProcess:
         return subprocess.run(
-            build_claude_command(prompt),
+            build_claude_command(prompt, light=True),
             capture_output=True,
             text=True,
             timeout=timeout,

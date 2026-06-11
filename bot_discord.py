@@ -405,7 +405,7 @@ def compress_summary(summary: str) -> str:
 
     try:
         result = subprocess.run(
-            build_claude_command(prompt),
+            build_claude_command(prompt, light=True),
             capture_output=True,
             text=True,
             timeout=60,
