@@ -43,6 +43,8 @@ cp .env.example .env
 | `DISCORD_GUILD_ID` | 否 | 伺服器 ID，設定後 `/help` slash command 即時生效（不設則需等最多 1 小時） |
 | `MAX_MESSAGES_BEFORE_COMPRESS` | 否 | 達到此訊息數時觸發自動壓縮（預設 16） |
 | `STREAM_ENABLED` | 否 | 串流輸出開關（預設 `true`，設為 `false` 改回等待完整回應） |
+| `CLAUDE_MODEL` | 否 | 指定 `claude -p` 使用的模型，可用別名 `opus` / `sonnet` / `haiku` 或完整 ID（如 `claude-opus-4-8`）；留空使用 CLI 預設模型 |
+| `CLAUDE_LIGHT_MODEL` | 否 | 輕量任務（摘要壓縮、cron 標題生成）使用的模型（如 `haiku`），省成本；未設定時退回 `CLAUDE_MODEL` |
 
 ## 使用方式
 
@@ -426,6 +428,31 @@ STREAM_ENABLED=false
 `claude -p "prompt" --permission-mode bypassPermissions`
 
 如果你想自己手動維護權限，請到 `claude_cli.py` 的 `build_claude_command()`，把 `--permission-mode bypassPermissions` 這段程式拿掉即可。
+
+### 禁用互動式工具
+
+`-p` 非互動模式下沒有使用者可以回應 `AskUserQuestion` / `ExitPlanMode` / `EnterPlanMode` 這類互動式工具，模型會誤判為「使用者拒絕回答」而中斷工作，因此透過 `--disallowedTools` 直接移除這些工具。
+
+### 模型設定（分級省成本）
+
+在 `.env` 設定 `CLAUDE_MODEL` 即可為所有 `claude -p` 呼叫指定模型；另外可設定 `CLAUDE_LIGHT_MODEL`，讓簡單任務改走較便宜的模型：
+
+```
+CLAUDE_MODEL=claude-opus-4-8
+CLAUDE_LIGHT_MODEL=claude-haiku-4-5
+```
+
+| 任務 | 使用模型 |
+|------|---------|
+| 主對話（含串流） | `CLAUDE_MODEL` |
+| 摘要生成 + 長期記憶萃取 | `CLAUDE_MODEL` |
+| cron 排程任務執行 | `CLAUDE_MODEL` |
+| 摘要再壓縮 | `CLAUDE_LIGHT_MODEL` |
+| cron 排程標題生成 | `CLAUDE_LIGHT_MODEL` |
+
+退回規則：`CLAUDE_LIGHT_MODEL` 未設定時使用 `CLAUDE_MODEL`；兩者皆未設定時不帶 `--model`，沿用 CLI 預設模型，行為與舊版相同。
+
+摘要生成之所以維持主模型，是因為它同時負責長期記憶萃取，品質直接影響跨對話記憶的準確度；摘要再壓縮與標題生成則是單純的文字濃縮，輕量模型即可勝任。
 
 ### 為什麼選擇 `claude -p`
 

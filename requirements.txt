@@ -1,6 +1,6 @@
 discord.py==2.7.1
 python-dotenv==1.2.2
-apscheduler>=4.0.0a5
-groq
+apscheduler==4.0.0a6
+groq>=1.4.0
 pre-commit
-ruff
+ruff>=0.15.16
