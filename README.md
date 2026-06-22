@@ -45,6 +45,7 @@ cp .env.example .env
 | `STREAM_ENABLED` | 否 | 串流輸出開關（預設 `true`，設為 `false` 改回等待完整回應） |
 | `CLAUDE_MODEL` | 否 | 指定 `claude -p` 使用的模型，可用別名 `opus` / `sonnet` / `haiku` 或完整 ID（如 `claude-opus-4-8`）；留空使用 CLI 預設模型 |
 | `CLAUDE_LIGHT_MODEL` | 否 | 輕量任務（摘要壓縮、cron 標題生成）使用的模型（如 `haiku`），省成本；未設定時退回 `CLAUDE_MODEL` |
+| `CLAUDE_EFFORT` | 否 | `claude -p` 的推理強度，可用 `low` / `medium` / `high` / `xhigh` / `max`；越高思考越深、token 與成本越高；未設定時預設 `xhigh`。Haiku 不支援 effort，使用 Haiku 模型時會自動略過 |
 
 ## 使用方式
 
@@ -453,6 +454,28 @@ CLAUDE_LIGHT_MODEL=claude-haiku-4-5
 退回規則：`CLAUDE_LIGHT_MODEL` 未設定時使用 `CLAUDE_MODEL`；兩者皆未設定時不帶 `--model`，沿用 CLI 預設模型，行為與舊版相同。
 
 摘要生成之所以維持主模型，是因為它同時負責長期記憶萃取，品質直接影響跨對話記憶的準確度；摘要再壓縮與標題生成則是單純的文字濃縮，輕量模型即可勝任。
+
+### 推理強度設定（effort）
+
+`CLAUDE_EFFORT` 控制 `claude -p` 的推理強度（thinking 預算），套用到**所有**呼叫（含串流與 cron）；未設定時預設 `xhigh`：
+
+```
+CLAUDE_EFFORT=xhigh
+```
+
+| 等級 | 說明 |
+|------|------|
+| `low` | 最少推理，最快、最省成本 |
+| `medium` | 中等推理 |
+| `high` | 較深推理 |
+| `xhigh` | **預設值**，高推理品質 |
+| `max` | 最大推理，最慢、最貴 |
+
+`effort` 越高，模型思考越深，output token 與花費也越高（實測同一道推理題，`max` 的 output token 約為 `low` 的 3 倍、耗時約 2.7 倍）。除 Haiku 外，本專案都會帶 `--effort`（預設 `xhigh`），所以沒設定也有明確值。
+
+> **Haiku 例外**：Haiku 模型不支援 `effort`，帶了 CLI 也只會默默忽略。因此當解析後的模型名稱含 `haiku`（例如 `CLAUDE_LIGHT_MODEL=haiku` 的輕量任務）時，本專案會自動**不帶** `--effort`。
+
+CLI 不會在輸出或 transcript 回報「這次用了哪一級 effort」，若要事後驗證實際效果，可用 `claude -p "..." --effort <級別> --output-format json` 比對回傳的 `output_tokens` / `duration_ms` / `total_cost_usd` 反推。
 
 ### 為什麼選擇 `claude -p`
 
