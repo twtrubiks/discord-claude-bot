@@ -537,6 +537,16 @@ def build_context(user_id: int) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def _build_cron_prompt(job_prompt: str) -> str:
+    """為 cron 排程組裝 prompt：前置當前時間。
+
+    互動 / 語音路徑會經過 build_context()，自動前置 get_current_timestamp()；
+    cron 路徑（不帶對話歷史）先前直接送 raw prompt，沒有時間基準。這裡補上
+    與互動路徑相同的時間前置，讓排程任務也有「現在幾點」可參照。
+    """
+    return "\n\n---\n\n".join([get_current_timestamp(), job_prompt])
+
+
 async def _save_conversation_turn(
     user_id: int, user_msg: str, assistant_msg: str
 ) -> None:
@@ -914,7 +924,7 @@ async def invoke_claude_for_channel(
     def run_claude_sync() -> subprocess.CompletedProcess:
         """同步執行 Claude CLI（在執行緒池中執行）"""
         return subprocess.run(
-            build_claude_command(prompt),
+            build_claude_command(_build_cron_prompt(prompt)),
             capture_output=True,
             text=True,
             timeout=timeout,
