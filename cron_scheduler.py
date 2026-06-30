@@ -21,6 +21,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from storage_utils import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 JOBS_FILE = Path("cron_jobs.json")
@@ -170,7 +172,7 @@ class CronScheduler:
         """儲存任務到 JSON"""
         try:
             data = [job.to_dict() for job in self._jobs.values()]
-            JOBS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            atomic_write_json(JOBS_FILE, data)
         except Exception as e:
             logger.error(f"Failed to save cron jobs: {e}")
 

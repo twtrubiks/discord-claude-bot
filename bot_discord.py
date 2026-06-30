@@ -30,6 +30,7 @@ from cron_commands import (
 )
 from cron_scheduler import cron_scheduler
 from speech_to_text import transcribe
+from storage_utils import atomic_write_json
 
 load_dotenv()
 
@@ -300,7 +301,7 @@ def save_memory():
         if facts
     }
     try:
-        MEMORY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        atomic_write_json(MEMORY_FILE, data)
     except Exception as e:
         logger.error(f"Failed to save memory: {e}")
 
@@ -338,7 +339,7 @@ def save_history():
         for uid, state in conversation_states.items()
     }
     try:
-        HISTORY_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        atomic_write_json(HISTORY_FILE, data)
     except Exception as e:
         logger.error(f"Failed to save history: {e}")
 
