@@ -35,3 +35,8 @@ voice_messages/
 
 # Claude Code
 CLAUDE.md
+
+# SQLite 對話封存（含完整對話原文，與 .env 同等級保護）
+sessions.db
+sessions.db-wal
+sessions.db-shm

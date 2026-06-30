@@ -70,6 +70,7 @@ python bot_discord.py
 - `/memory` - 查看長期記憶
 - `/forget` - 清除所有長期記憶
 - `/forget <編號>` - 刪除特定一條記憶
+- `/recall <關鍵字>` - 搜尋已封存的歷史對話（即使已被摘要壓縮丟棄，原文仍可搜尋）
 
 **排程**
 - `/remind <時間> <訊息>` - 一次性提醒（如 `/remind 30m 開會`，到時觸發 Claude）
@@ -95,12 +96,12 @@ on_message() 接收
         ├─ 空訊息？        → 忽略
         ├─ 特殊指令？      → 對應處理
         │   (/help, /new, /clear, /context, /summarize, /summary,
-        │    /memory, /forget, /cron, /remind, /every, /daily...)
+        │    /memory, /forget, /recall, /cron, /remind, /every, /daily...)
         │
         ▼
 ask_claude_with_lock(user_id, message)
         │
-        ├─ 組合上下文（長期記憶 + 摘要 + 歷史）
+        ├─ 組合上下文（長期記憶 + 摘要 + 歷史 + 自動召回封存）
         │
         ▼
 STREAM_ENABLED?
@@ -249,6 +250,8 @@ User: 幫我寫一個函數
 - `save_memory()`：將長期記憶序列化為 JSON，存到 `memory.json`
 - `load_memory()`：啟動時載入長期記憶
 
+以上 JSON 寫檔皆走 `storage_utils.atomic_write_json()`（先寫同目錄 temp 檔，`os.fsync` 落盤後再 `os.replace` 原子置換），讀者永遠只會看到舊的或新的完整檔，寫一半當機也不會損毀原檔。對話原文另以 append-only 永久封存到 SQLite（見「對話封存與召回」）。
+
 ### 限制參數
 
 | 參數 | 值 | 說明 |
@@ -293,12 +296,13 @@ User: 幫我寫一個函數
 
 除了 session 內的摘要壓縮，本專案還實作了跨對話的長期記憶系統。
 
-### 兩層記憶架構
+### 三層記憶架構
 
 | 層級 | 用途 | 生命週期 | 儲存位置 |
 |------|------|----------|----------|
 | **摘要 (summary)** | 單次對話內的上下文壓縮 | `/clear` 或 `/new` 時清除 | `conversation_history.json` |
 | **長期記憶 (memory)** | 跨對話的用戶長期資訊 | 永久保留，需 `/forget` 清除 | `memory.json` |
+| **對話封存 (archive)** | 每則對話原文，供搜尋與自動召回 | append-only 永久保留 | `sessions.db` (SQLite+FTS5) |
 
 ### 記憶如何產生
 
@@ -343,6 +347,34 @@ User: 幫我寫一個函數
 | 萃取長期記憶條目 | 是（>= 4 條訊息時） | 否 |
 | 清除長期記憶 | 否 | 否 |
 | 適用場景 | 切換話題（推薦） | 完全重置對話 |
+
+## 對話封存與召回
+
+摘要與長期記憶都是「壓縮後」的資訊——摘要會丟棄原始字句，超過上限的記憶條目也會被淘汰。為了讓舊對話原文不流失，每則訊息都會 append-only 永久封存到 SQLite（`memory_store.py`），即使之後被摘要壓縮丟棄，原文仍可搜尋與召回。
+
+### 儲存與索引
+
+- **`messages`**：唯一真相（canonical），永久保存每則對話原文 + metadata。
+- **`messages_fts`**：FTS5 unicode61 分詞，給英文/數字關鍵字（bm25 排序）。
+- **`messages_fts_trigram`**：FTS5 trigram 分詞，給中文等無空格語言做子字串比對。
+- 兩個 FTS 表都用 external content（只存索引、不存原文），壞掉時可從 `messages` 就地 `rebuild`，零資料損失。
+- 啟動時會用「一定 rollback 的試寫」探測 FTS 寫入損毀（唯讀檢查抓不到此類），壞了自動重建；trigram tokenizer 不可用的 SQLite build 則降級為 `LIKE` 子字串。
+
+### `/recall` 手動搜尋
+
+`/recall <關鍵字>` 從封存撈出含該關鍵字的歷史對話（最多 8 筆，附時間與 snippet）。中文走精準子字串比對，英文/數字走 FTS5 詞比對、0 筆時降級 `LIKE`。
+
+### 自動召回（auto-recall）
+
+一般對話時，會用當前訊息去封存做模糊比對（中文拆 trigram 用 OR，任一片段命中即召回），把相關舊事注入 prompt，放在「最近對話」之前。
+
+- 受 `RECALL_MIN_QUERY_CHARS`（預設 6）門檻控管，太短或純寒暄不觸發。
+- 命中內容會與「最近對話」去重，並套用 `MAX_RECALL_CHARS`（預設 1200）/`RECALL_LIMIT`（預設 4）子預算。
+- 注入區塊標示「系統自動撈出，未必精準，僅供參考」，避免模型過度採信。
+- 封存查詢與寫入握同一把鎖，故 `_build_prompt()` 與封存皆丟 executor 執行，避免阻塞 Discord heartbeat。
+- 封存或召回失敗一律只記 log，絕不影響正常回訊息（熱狀態仍在 JSON）。
+
+> **隱私**：`sessions.db` 含完整對話原文，安全等級等同 `.env`，已列入 `.gitignore`（連同 `-wal`/`-shm`）。
 
 為了讓這套記憶系統在 Discord 環境中順暢運作，需要特別處理非同步執行的問題。
 

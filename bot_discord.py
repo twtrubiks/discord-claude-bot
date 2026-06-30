@@ -29,6 +29,7 @@ from cron_commands import (
     handle_remind_command,
 )
 from cron_scheduler import cron_scheduler
+from memory_store import get_store
 from speech_to_text import transcribe
 from storage_utils import atomic_write_json
 
@@ -172,6 +173,11 @@ HISTORY_FILE = Path("conversation_history.json")
 MEMORY_FILE = Path("memory.json")
 MAX_MEMORY_FACTS = 20  # 每用戶最多保留的事實數量
 MAX_MEMORY_CHARS = 1500  # 記憶注入上下文的最大字符數
+
+# 自動召回（建議A）：從封存撈相關舊事注入 prompt
+MAX_RECALL_CHARS = 1200  # 召回區塊字元上限（從上下文預算裡分一塊）
+RECALL_LIMIT = 4  # 最多注入幾則命中
+RECALL_MIN_QUERY_CHARS = 6  # 太短的訊息不觸發召回
 
 # 語音訊息儲存目錄
 VOICE_DIR = Path("voice_messages")
@@ -495,8 +501,55 @@ def maybe_compress_history(user_id: int):
             logger.info(f"Extracted {len(new_facts)} facts for user {user_id}")
 
 
-def build_context(user_id: int) -> str:
-    """組合摘要 + 最近對話為上下文"""
+def _should_recall(query: str) -> bool:
+    """召回門檻：太短/純寒暄就不撈，省 token、避免亂入。"""
+    q = (query or "").strip()
+    if len(q) < RECALL_MIN_QUERY_CHARS:
+        return False
+    greetings = {"你好", "嗨", "謝謝", "感謝", "早安", "晚安", "哈囉", "在嗎"}
+    return q not in greetings
+
+
+def _recall_block(user_id: int, query: str, exclude: set[str]) -> Optional[str]:
+    """查封存、濾掉與最近對話重複者、套字元預算，組成召回區塊。
+
+    封存壞掉/未建 → 靜默跳過（回 None），絕不影響正常回答。
+    """
+    try:
+        # fuzzy=True：整句拆 trigram OR 比對，中文自然語言也能召回
+        hits = get_store().search(query, user_id, limit=RECALL_LIMIT * 2, fuzzy=True)
+    except Exception as e:
+        logger.debug(f"auto-recall skipped: {e}")
+        return None
+    if not hits:
+        return None
+
+    lines: list[str] = []
+    used = 0
+    for h in hits:
+        content = (h.get("content") or "").strip()
+        if not content or content in exclude:  # 去重：最近對話已有就不重複灌
+            continue
+        who = "你" if h["role"] == "user" else "Bot"
+        line = f"({h['ts']}) {who}：{content}"
+        if used + len(line) > MAX_RECALL_CHARS:  # 子預算守門
+            break
+        lines.append(line)
+        used += len(line)
+        if len(lines) >= RECALL_LIMIT:
+            break
+    if not lines:
+        return None
+    # 可見性：自動召回是靜默注入，使用者端看不到；記 log 方便事後除錯品質
+    logger.info(
+        f"auto-recall uid={user_id} query={query[:30]!r} -> 注入 {len(lines)} 則"
+    )
+    body = "\n".join(lines)
+    return "[可能相關的過去對話（系統自動撈出，未必精準，僅供參考）]\n" + body
+
+
+def build_context(user_id: int, query: Optional[str] = None) -> str:
+    """組合摘要 + 最近對話為上下文（傳入 query 時啟用自動召回）"""
     state = get_conversation_state(user_id)
     parts = []
 
@@ -518,22 +571,28 @@ def build_context(user_id: int) -> str:
     if state.summary:
         parts.append(f"[Previous conversation summary]\n{state.summary}")
 
-    # 加入最近對話
-    if state.messages:
-        context_parts: list[str] = []
-        total_chars = 0
+    # 先算出「最近對話」要放哪些，順便收集其原文供召回去重
+    recent_entries: list[str] = []
+    recent_contents: set[str] = set()
+    total_chars = 0
+    for msg in reversed(state.messages):
+        entry = f"{msg.role.capitalize()}: {msg.content}"
+        if total_chars + len(entry) > MAX_CONTEXT_CHARS:
+            break
+        recent_entries.insert(0, entry)
+        recent_contents.add(msg.content.strip())
+        total_chars += len(entry)
 
-        # 從最新往回取，確保不超過字符限制
-        for msg in reversed(state.messages):
-            entry = f"{msg.role.capitalize()}: {msg.content}"
-            if total_chars + len(entry) > MAX_CONTEXT_CHARS:
-                break
-            context_parts.insert(0, entry)
-            total_chars += len(entry)
+    # 自動召回（建議A）：用當前訊息去封存撈相關舊事，放在「最近對話」之前。
+    # 不傳 query 的呼叫端（如 /context）行為完全不變。
+    if query and _should_recall(query):
+        recall_block = _recall_block(user_id, query, recent_contents)
+        if recall_block:
+            parts.append(recall_block)
 
-        if context_parts:
-            recent = "\n\n".join(context_parts)
-            parts.append(f"[Recent conversation]\n{recent}")
+    # 最近對話
+    if recent_entries:
+        parts.append("[Recent conversation]\n" + "\n\n".join(recent_entries))
 
     return "\n\n---\n\n".join(parts)
 
@@ -556,13 +615,32 @@ async def _save_conversation_turn(
     state.messages.append(Message("user", user_msg, datetime.now()))
     state.messages.append(Message("assistant", assistant_msg, datetime.now()))
     save_history()
+
+    # 封存與壓縮都丟 executor：兩個 append() 會搶 store 的鎖，若在 event loop
+    # 上同步執行，遇到 /recall 掃描握鎖時會卡停 Discord heartbeat（與
+    # subprocess/transcribe 同一原則）。永久封存到 SQLite（JSON 壓縮丟棄原文後
+    # 這裡仍留得住、可搜尋）；append() 內部已 try/except，封存失敗只記 log，
+    # 不影響回訊息。
+    def _persist_and_compress() -> None:
+        store = get_store()
+        store.append(user_id, "user", user_msg)
+        store.append(user_id, "assistant", assistant_msg)
+        maybe_compress_history(user_id)
+
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(executor, maybe_compress_history, user_id)
+    await loop.run_in_executor(executor, _persist_and_compress)
 
 
-def _build_prompt(user_id: int, message_text: str) -> str:
-    """組合上下文與使用者訊息為完整 prompt。"""
-    context = build_context(user_id)
+async def _build_prompt(user_id: int, message_text: str) -> str:
+    """組合上下文與使用者訊息為完整 prompt。
+
+    build_context() 內含 auto-recall 的 FTS 查詢（會搶 store 的鎖），故整段丟
+    executor，避免在 event loop 上阻塞 Discord heartbeat。build_context 只讀
+    in-memory 狀態與封存，且同一使用者的讀寫已被 per-user lock 串行化，移到
+    executor 不會引入新的競態。
+    """
+    loop = asyncio.get_running_loop()
+    context = await loop.run_in_executor(executor, build_context, user_id, message_text)
     return f"""先前的對話紀錄：
 {context}
 
@@ -589,7 +667,7 @@ async def ask_claude(
     Returns:
         Claude 的回應或錯誤訊息
     """
-    full_prompt = _build_prompt(user_id, message)
+    full_prompt = await _build_prompt(user_id, message)
 
     def run_claude_sync() -> subprocess.CompletedProcess:
         """同步執行 Claude CLI（在執行緒池中執行）"""
@@ -787,7 +865,7 @@ async def ask_claude_stream(
     timeout: int = 600,
 ) -> None:
     """以 streaming 方式調用 Claude CLI，即時更新 Discord 訊息。"""
-    full_prompt = _build_prompt(user_id, message_text)
+    full_prompt = await _build_prompt(user_id, message_text)
     cmd = build_claude_stream_command(full_prompt)
     last_error: str | None = None
 
@@ -867,6 +945,7 @@ HELP_TEXT = """**對話指令：**
 • `/memory` 或 `記憶` - 查看長期記憶
 • `/forget` 或 `忘記` - 清除所有長期記憶
 • `/forget <編號>` - 刪除特定一條記憶
+• `/recall <關鍵字>` - 搜尋已封存的歷史對話（即使已被摘要壓縮）
 
 **排程指令：**
 • `/cron list` - 列出所有排程任務
@@ -1226,6 +1305,30 @@ async def on_message(message: discord.Message):
             await message.channel.send("目前沒有摘要")
         return
 
+    # 特殊命令：搜尋封存的歷史對話（即使已被 JSON 壓縮丟棄，原文仍在 SQLite）
+    if user_message.lower() == "/recall":
+        await message.channel.send("用法：`/recall 關鍵字`")
+        return
+    if user_message.lower().startswith("/recall "):
+        keyword = user_message[8:].strip()
+        if not keyword:
+            await message.channel.send("用法：`/recall 關鍵字`")
+            return
+        loop = asyncio.get_running_loop()
+        hits = await loop.run_in_executor(
+            executor,
+            lambda: get_store().search(keyword, message.author.id, limit=8),
+        )
+        if not hits:
+            await message.channel.send(f"找不到含「{keyword}」的歷史對話")
+            return
+        lines = [f"找到 {len(hits)} 筆含「{keyword}」的歷史："]
+        for h in hits:
+            who = "你" if h["role"] == "user" else "Bot"
+            lines.append(f"`{h['ts']}` **{who}**：{h['snippet']}")
+        await message.channel.send("\n".join(lines)[:1900])
+        return
+
     # Cron 排程指令
     if user_message.lower().startswith("/cron"):
         args = user_message.split()[1:]
@@ -1275,6 +1378,7 @@ def main():
     # 啟動時載入歷史和記憶
     load_history()
     load_memory()
+    get_store()  # 建表 / WAL / FTS 寫入健康探測（壞了就地 rebuild）
     client.run(DISCORD_BOT_TOKEN)
 
 
