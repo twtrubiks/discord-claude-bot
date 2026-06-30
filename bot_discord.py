@@ -741,11 +741,20 @@ async def _run_stream_loop(
             except discord.HTTPException:
                 logger.debug("Failed to finalize message edit")
         else:
+            # 多則 / 超長：先把乾淨分塊「送成功」，再刪舊的串流訊息。
+            # 順序是關鍵——先送後刪：任何一塊送失敗都不會讓回覆從畫面消失。
+            try:
+                for chunk in chunk_message(full_response):
+                    await channel.send(chunk)
+            except discord.HTTPException as e:
+                # 重送途中失敗：保留已串流的訊息（內容仍在畫面上），
+                # 不刪、不往上拋，讓 full_response 照常 return 去存檔。
+                logger.warning(f"串流收尾重送失敗，保留原串流訊息: {e}")
+                return full_response
+            # 全部重送成功 → 才安全刪除舊的串流訊息
             await asyncio.gather(
                 *(msg.delete() for msg in sent_messages), return_exceptions=True
             )
-            for chunk in chunk_message(full_response):
-                await channel.send(chunk)
 
         return full_response
 
