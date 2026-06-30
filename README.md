@@ -46,6 +46,7 @@ cp .env.example .env
 | `CLAUDE_MODEL` | 否 | 指定 `claude -p` 使用的模型，可用別名 `opus` / `sonnet` / `haiku` 或完整 ID（如 `claude-opus-4-8`）；留空使用 CLI 預設模型 |
 | `CLAUDE_LIGHT_MODEL` | 否 | 輕量任務（摘要壓縮、cron 標題生成）使用的模型（如 `haiku`），省成本；未設定時退回 `CLAUDE_MODEL` |
 | `CLAUDE_EFFORT` | 否 | `claude -p` 的推理強度，可用 `low` / `medium` / `high` / `xhigh` / `max`；越高思考越深、token 與成本越高；未設定時預設 `xhigh`。Haiku 不支援 effort，使用 Haiku 模型時會自動略過 |
+| `CLAUDE_TIMEOUT` | 否 | 排程任務（cron）單次 `claude -p` 執行超時秒數；未設定時預設 `1800`（30 分鐘）。排程重活在 `xhigh` 下常超過 10 分鐘，可視需要加大 |
 
 ## 使用方式
 

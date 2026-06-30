@@ -6,6 +6,24 @@ CLAUDE_PERMISSION_MODE = "bypassPermissions"
 CLAUDE_DISALLOWED_TOOLS = "AskUserQuestion,ExitPlanMode,EnterPlanMode"
 # claude --effort 支援 low/medium/high/xhigh/max；未設定 CLAUDE_EFFORT 時的預設值
 CLAUDE_DEFAULT_EFFORT = "xhigh"
+# claude -p 單次執行超時秒數，未設定 CLAUDE_TIMEOUT 時的預設值
+# 排程重活（多檔分析、抓網頁）在 xhigh 下常逼近 10 分鐘，故預設拉到 30 分鐘
+CLAUDE_DEFAULT_TIMEOUT = 1800
+
+
+def get_claude_timeout() -> int:
+    """讀取 claude -p 執行超時秒數（在呼叫時讀取，確保 load_dotenv 已生效）。
+
+    CLAUDE_TIMEOUT 未設定、非數字或非正數時，退回 CLAUDE_DEFAULT_TIMEOUT。
+    """
+    raw = os.environ.get("CLAUDE_TIMEOUT", "").strip()
+    if not raw:
+        return CLAUDE_DEFAULT_TIMEOUT
+    try:
+        value = int(raw)
+    except ValueError:
+        return CLAUDE_DEFAULT_TIMEOUT
+    return value if value > 0 else CLAUDE_DEFAULT_TIMEOUT
 
 
 def build_claude_command(prompt: str, light: bool = False) -> list[str]:

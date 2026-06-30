@@ -17,7 +17,11 @@ from zoneinfo import ZoneInfo
 import discord
 from dotenv import load_dotenv
 
-from claude_cli import build_claude_command, build_claude_stream_command
+from claude_cli import (
+    build_claude_command,
+    build_claude_stream_command,
+    get_claude_timeout,
+)
 from cron_commands import (
     handle_cron_command,
     handle_daily_command,
@@ -883,15 +887,20 @@ async def send_channel_message(channel_id: int, message: str):
 
 
 async def invoke_claude_for_channel(
-    channel_id: int, _user_id: int, prompt: str, timeout: int = 600
+    channel_id: int, _user_id: int, prompt: str, timeout: Optional[int] = None
 ) -> str:
     """為頻道觸發 Claude 回應（不帶對話歷史）
 
     使用 ThreadPoolExecutor 執行 subprocess，避免阻塞 asyncio 事件循環。
+    timeout 未指定時讀取 CLAUDE_TIMEOUT（預設見 claude_cli.CLAUDE_DEFAULT_TIMEOUT）。
     """
     channel = client.get_channel(channel_id)
     if not channel:
+        logger.warning(f"invoke_claude_for_channel: channel {channel_id} 不存在，略過")
         return ""
+
+    if timeout is None:
+        timeout = get_claude_timeout()
 
     def run_claude_sync() -> subprocess.CompletedProcess:
         """同步執行 Claude CLI（在執行緒池中執行）"""
@@ -902,20 +911,48 @@ async def invoke_claude_for_channel(
             timeout=timeout,
         )
 
+    preview = prompt[:50].replace("\n", " ")
+    logger.info(
+        f"invoke_claude_for_channel 開始: channel={channel_id}, "
+        f"timeout={timeout}s, prompt={preview!r}"
+    )
+    start = time.monotonic()
+
     async with safe_typing(channel):
         # 使用執行緒池執行阻塞呼叫，不會阻塞 asyncio 事件循環
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(executor, run_claude_sync)
 
+            elapsed = time.monotonic() - start
             if result.returncode != 0:
                 response = f"Claude 執行失敗: {result.stderr.strip()}"
+                logger.error(
+                    f"invoke_claude_for_channel 失敗: channel={channel_id}, "
+                    f"code={result.returncode}, elapsed={elapsed:.1f}s, "
+                    f"stderr={result.stderr.strip()[:200]!r}"
+                )
             else:
                 response = result.stdout.strip() or "Claude 無回應"
+                logger.info(
+                    f"invoke_claude_for_channel 完成: channel={channel_id}, "
+                    f"elapsed={elapsed:.1f}s, output_len={len(response)}"
+                )
         except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - start
             response = "Claude 執行超時"
+            logger.warning(
+                f"invoke_claude_for_channel 超時: channel={channel_id}, "
+                f"timeout={timeout}s, elapsed={elapsed:.1f}s, prompt={preview!r}"
+            )
         except Exception as e:
+            elapsed = time.monotonic() - start
             response = f"錯誤: {e}"
+            logger.error(
+                f"invoke_claude_for_channel 例外: channel={channel_id}, "
+                f"elapsed={elapsed:.1f}s, error={e}",
+                exc_info=True,
+            )
 
     for chunk in chunk_message(response):
         await channel.send(chunk)
