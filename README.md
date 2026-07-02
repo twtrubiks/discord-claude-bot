@@ -1,6 +1,8 @@
 # Discord Claude Bot
 
-這是一個 Discord 私人助理機器人，基於 [openclaw](https://github.com/openclaw/openclaw) 概念重新實作精簡版。
+這是一個 Discord 私人助理機器人，概念上受 [openclaw](https://github.com/openclaw/openclaw) 啟發後重新實作為精簡版，
+
+記憶層設計則參考了 [hermes-agent](https://github.com/nousresearch/hermes-agent) 的 state 持久化模式，
 
 專為個人使用設計，具備對話記憶與排程提醒功能，讓 Claude 成為你的專屬 AI 助手。
 
@@ -43,9 +45,9 @@ cp .env.example .env
 | `DISCORD_GUILD_ID` | 否 | 伺服器 ID，設定後 `/help` slash command 即時生效（不設則需等最多 1 小時） |
 | `MAX_MESSAGES_BEFORE_COMPRESS` | 否 | 達到此訊息數時觸發自動壓縮（預設 16） |
 | `STREAM_ENABLED` | 否 | 串流輸出開關（預設 `true`，設為 `false` 改回等待完整回應） |
-| `CLAUDE_MODEL` | 否 | 指定 `claude -p` 使用的模型，可用別名 `opus` / `sonnet` / `haiku` 或完整 ID（如 `claude-opus-4-8`）；留空使用 CLI 預設模型 |
-| `CLAUDE_LIGHT_MODEL` | 否 | 輕量任務（摘要壓縮、cron 標題生成）使用的模型（如 `haiku`），省成本；未設定時退回 `CLAUDE_MODEL` |
-| `CLAUDE_EFFORT` | 否 | `claude -p` 的推理強度，可用 `low` / `medium` / `high` / `xhigh` / `max`；越高思考越深、token 與成本越高；未設定時預設 `xhigh`。Haiku 不支援 effort，使用 Haiku 模型時會自動略過 |
+| `CLAUDE_MODEL` | 否 | 指定 `claude -p` 使用的模型；留空使用 CLI 預設。詳見「模型設定」 |
+| `CLAUDE_LIGHT_MODEL` | 否 | 輕量任務改用的省成本模型；詳見「模型設定」 |
+| `CLAUDE_EFFORT` | 否 | 推理強度 `low`/`medium`/`high`/`xhigh`/`max`，預設 `xhigh`；詳見「推理強度設定」 |
 | `CLAUDE_TIMEOUT` | 否 | 排程任務（cron）單次 `claude -p` 執行超時秒數；未設定時預設 `1800`（30 分鐘）。排程重活在 `xhigh` 下常超過 10 分鐘，可視需要加大 |
 
 ## 使用方式
@@ -260,7 +262,7 @@ User: 幫我寫一個函數
 | `MAX_SUMMARY_CHARS` | 2000 | 摘要最大字元數 |
 | `MAX_MEMORY_FACTS` | 20 | 每用戶最多保留的長期記憶條目數量 |
 | `MAX_MEMORY_CHARS` | 1500 | 記憶注入上下文的最大字符數 |
-| 壓縮觸發門檻 | 預設 16 條訊息 | 超過此數量觸發自動壓縮（可由 `MAX_MESSAGES_BEFORE_COMPRESS` 調整） |
+| `SUMMARY_TIMEOUT_SECONDS` | 180 | 摘要生成/再壓縮單次執行超時秒數（xhigh 推理較慢，60 秒不夠用） |
 
 ### 運作流程
 
@@ -370,6 +372,7 @@ User: 幫我寫一個函數
 
 - 受 `RECALL_MIN_QUERY_CHARS`（預設 6）門檻控管，太短或純寒暄不觸發。
 - 命中內容會與「最近對話」去重，並套用 `MAX_RECALL_CHARS`（預設 1200）/`RECALL_LIMIT`（預設 4）子預算。
+- 單則命中超過 `RECALL_SNIPPET_CHARS`（預設 300）會截斷並標記「…（截斷）」——封存的 assistant 回覆是分塊前原文，可能很長，不截斷的話一條長回覆就會吃光（或直接擋掉）整塊預算；某條超出剩餘預算時跳過它繼續放後面的命中。
 - 注入區塊標示「系統自動撈出，未必精準，僅供參考」，避免模型過度採信。
 - 封存查詢與寫入握同一把鎖，故 `_build_prompt()` 與封存皆丟 executor 執行，避免阻塞 Discord heartbeat。
 - 封存或召回失敗一律只記 log，絕不影響正常回訊息（熱狀態仍在 JSON）。
@@ -547,7 +550,7 @@ and cannot be used for other API requests."
 
 ### 結論
 
-這是一個**取捨**：為了使用訂閱額度，犧牲了一些功能性。對於個人使用的 Discord Bot，這個取捨是可接受的。透過 `--include-partial-messages` 已實現即時串流回覆，大幅改善使用體驗。如果需要更強大的功能（如 Tool Use），建議購買官方 API Key。
+這是一個**取捨**：犧牲部分功能性，換取訂閱額度。對個人使用的 Discord Bot 可接受——`--include-partial-messages` 已補回即時串流體驗；若需要 Tool Use 等更強功能，再購買官方 API Key 即可。
 
 ## Claude Code Skills
 

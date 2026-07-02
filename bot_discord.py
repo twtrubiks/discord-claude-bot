@@ -178,6 +178,7 @@ MAX_MEMORY_CHARS = 1500  # 記憶注入上下文的最大字符數
 MAX_RECALL_CHARS = 1200  # 召回區塊字元上限（從上下文預算裡分一塊）
 RECALL_LIMIT = 4  # 最多注入幾則命中
 RECALL_MIN_QUERY_CHARS = 6  # 太短的訊息不觸發召回
+RECALL_SNIPPET_CHARS = 300  # 單則命中截斷上限，免得一條長回覆吃光整塊預算
 
 # 語音訊息儲存目錄
 VOICE_DIR = Path("voice_messages")
@@ -219,6 +220,10 @@ def get_conversation_state(user_id: int) -> ConversationState:
 # AI 摘要設定
 MESSAGES_TO_SUMMARIZE = 10  # 壓縮最舊的 10 則訊息（約 5 輪對話）
 MAX_SUMMARY_CHARS = 2000  # 摘要最大字符數
+# 摘要/再壓縮單次執行超時秒數。xhigh 推理的尾端情況會超過 60 秒，逾時會
+# 「不壓縮 → 下輪重試再逾時」靜默循環；但此值同時是 per-user lock 的最長
+# 額外等待（_save_conversation_turn 在鎖內 await），不宜開太大。
+SUMMARY_TIMEOUT_SECONDS = 180
 
 SUMMARY_PROMPT = """請將以下對話處理成兩個部分：
 
@@ -419,7 +424,7 @@ def compress_summary(summary: str) -> str:
             build_claude_command(prompt, light=True),
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=SUMMARY_TIMEOUT_SECONDS,
         )
         # 檢查返回碼
         if result.returncode != 0:
@@ -451,7 +456,7 @@ def generate_summary(messages: list[Message]) -> tuple[str, list[str]]:
             build_claude_command(prompt),
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=SUMMARY_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             logger.error(f"Summary generation CLI error: {result.stderr.strip()}")
@@ -530,15 +535,24 @@ def _recall_block(user_id: int, query: str, exclude: set[str]) -> Optional[str]:
         content = (h.get("content") or "").strip()
         if not content or content in exclude:  # 去重：最近對話已有就不重複灌
             continue
+        # 截斷長訊息（封存的 assistant 回覆是 chunking 前原文，可遠超 1200）：
+        # 不截的話，一條長回覆排第一名就會直接超預算，把整塊召回拖成 0 則
+        if len(content) > RECALL_SNIPPET_CHARS:
+            content = content[:RECALL_SNIPPET_CHARS] + "…（截斷）"
         who = "你" if h["role"] == "user" else "Bot"
         line = f"({h['ts']}) {who}：{content}"
-        if used + len(line) > MAX_RECALL_CHARS:  # 子預算守門
-            break
+        if used + len(line) > MAX_RECALL_CHARS:  # 子預算守門：跳過這條，後面的還有機會
+            continue
         lines.append(line)
         used += len(line)
         if len(lines) >= RECALL_LIMIT:
             break
     if not lines:
+        # 有命中但全被去重/預算濾掉也要留痕跡，否則「召回沒發生」無從察覺
+        logger.info(
+            f"auto-recall uid={user_id} query={query[:30]!r} -> 0 則"
+            f"（命中 {len(hits)} 則但全被濾除）"
+        )
         return None
     # 可見性：自動召回是靜默注入，使用者端看不到；記 log 方便事後除錯品質
     logger.info(
